@@ -154,4 +154,75 @@ kubectl apply -f deployments/k8s/
 ✅ **Multi-Layer Traffic Management:** Combines **NGINX, Go, and ML** for **fine-grained** request handling.  
 ✅ **Resilient & Scalable:** Supports **microservices, failover handling, and observability tools**.  
 
----
+
+```plaintext
+📂 ai-load-balancer/
+│── 📂 .github/                   # GitHub Actions (CI/CD) workflows
+│   ├── workflows/
+│   │   ├── ci.yml                # CI: Build, test, lint
+│   │   ├── cd.yml                # CD: Deploy with ArgoCD/K8s
+│── 📂 backend/                   # Backend system (Load Balancer, API, DB)
+│   ├── 📂 cmd/                    # Application entry points
+│   │   ├── api/                   # Main API binary
+│   │   │   ├── main.go            # Initializes API server
+│   ├── 📂 configs/                 # Configuration files
+│   │   ├── config.yaml            # Backend config
+│   │   ├── nginx.conf             # NGINX reverse proxy config
+│   ├── 📂 internal/                # Core backend logic
+│   │   ├── 📂 api/                 # API handlers
+│   │   │   ├── handlers.go        # Request handlers
+│   │   │   ├── middleware.go      # Middleware (logging, auth, etc.)
+│   │   │   ├── router.go          # Route definitions (Echo)
+│   │   ├── 📂 loadbalancer/        # Load balancing logic
+│   │   │   ├── balancer.go        # Core balancing logic
+│   │   │   ├── strategies.go      # Round Robin, Least Connections, etc.
+│   │   ├── 📂 models/              # Data structures
+│   │   │   ├── server.go          # Server status & metadata
+│   │   │   ├── request.go         # API request/response models
+│   │   ├── 📂 metrics/             # Monitoring and metrics collection
+│   │   │   ├── collector.go       # Fetches Prometheus metrics
+│   │   │   ├── storage.go         # Stores server stats in TimescaleDB
+│   │   ├── 📂 database/            # Database connections & queries
+│   │   │   ├── db.go              # MySQL/TimescaleDB connection
+│   │   │   ├── migrations.sql     # DB schema migrations
+│   │   ├── 📂 utils/               # Utility functions
+│   │   │   ├── logger.go          # Structured logging
+│   │   │   ├── config.go          # Reads app configs
+│── 📂 ml/                         # AI Model for Load Balancing
+│   ├── 📂 model-server/            # Model inference server
+│   │   ├── main.go                # Runs ONNX-based inference service
+│   ├── 📂 training/                # Model training scripts
+│   │   ├── train_model.py         # AI model training script
+│   │   ├── data_preprocessing.py  # Data cleaning & processing
+│   ├── 📂 models/                  # Trained models
+│   │   ├── load_balancer.onnx     # Pre-trained model file
+│   ├── 📂 utils/                   # ML utilities
+│   │   ├── inference.py           # Runs model inference
+│   │   ├── trainer.py             # Model training functions
+│── 📂 deployments/                 # Kubernetes & Helm deployment scripts
+│   ├── 📂 k8s/                     # K8s manifests
+│   │   ├── backend-deployment.yaml # Backend service deployment
+│   │   ├── ml-deployment.yaml      # ML service deployment
+│   │   ├── service.yaml            # Service definitions
+│   ├── 📂 helm/                    # Helm charts for deployment
+│── 📂 migrations/                  # Database migration scripts
+│   ├── 001_create_tables.sql       # Initial database schema
+│── 📂 scripts/                      # Automation scripts
+│   ├── build.sh                    # Builds the project
+│   ├── run.sh                      # Starts the service locally
+│── 📂 test/                         # Unit and integration tests
+│   ├── api_test.go                  # API tests
+│   ├── loadbalancer_test.go         # Load balancer logic tests
+│   ├── ml_test.py                   # AI model tests
+│── 📂 docs/                         # Documentation
+│   ├── README.md                    # Project overview
+│   ├── API.md                        # API documentation
+│   ├── ARCHITECTURE.md               # System architecture details
+│── .env                              # Environment variables
+│── .gitignore                        # Ignore files
+│── docker-compose.yml                # Docker Compose setup for local dev
+│── Dockerfile                        # API containerization
+│── go.mod                            # Go module dependencies
+│── go.sum                            # Go module checksum
+│── Taskfile.yml                      # Task automation
+```
