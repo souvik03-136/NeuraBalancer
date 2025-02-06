@@ -1,4 +1,4 @@
-# ** Self-Optimizing Load Balancer**  
+# Self-Optimizing Load Balancer
 ### **🔹 Overview**
 The **AI-Driven Self-Optimizing Load Balancer** is a high-performance, **self-learning** traffic distribution system designed to optimize request routing based on **server health, request complexity, and AI-predicted response times**. Unlike traditional round-robin or least-connections load balancers, this system leverages **machine learning** to dynamically predict and adjust traffic distribution in real time.
 
