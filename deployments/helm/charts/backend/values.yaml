@@ -1,0 +1,20 @@
+replicaCount: 2
+
+image:
+  repository: my-backend-image
+  tag: latest
+  pullPolicy: IfNotPresent
+
+env:
+  DB_HOST: my-database
+  DB_PORT: "5432"
+  DB_USER: myuser
+  DB_PASSWORD: mypassword
+
+resources:
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+  requests:
+    cpu: "250m"
+    memory: "256Mi"

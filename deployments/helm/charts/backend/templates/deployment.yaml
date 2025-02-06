@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: "{{ .Values.image.pullPolicy }}"
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DB_HOST
+          value: "{{ .Values.env.DB_HOST }}"
+        - name: DB_PORT
+          value: "{{ .Values.env.DB_PORT }}"
+        - name: DB_USER
+          value: "{{ .Values.env.DB_USER }}"
+        - name: DB_PASSWORD
+          value: "{{ .Values.env.DB_PASSWORD }}"
+        resources:
+          limits:
+            cpu: "{{ .Values.resources.limits.cpu }}"
+            memory: "{{ .Values.resources.limits.memory }}"
+          requests:
+            cpu: "{{ .Values.resources.requests.cpu }}"
+            memory: "{{ .Values.resources.requests.memory }}"
