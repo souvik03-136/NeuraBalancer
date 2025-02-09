@@ -1,0 +1,148 @@
+version: '3'
+
+tasks:
+
+  # 🔹 GO BUILD & RUN ─────────────────────────────────────────────────
+
+  build:
+    desc: "Build the Go Load Balancer binary"
+    cmds:
+      - go build -o bin/neura-balancer backend/cmd/api/main.go
+    sources:
+      - backend/cmd/api/main.go
+    generates:
+      - bin/neura-balancer
+
+  run:
+    desc: "Run the Load Balancer locally"
+    cmds:
+      - go run backend/cmd/api/main.go
+
+  test:
+    desc: "Run unit tests for the Go backend"
+    cmds:
+      - go test -v ./test/...
+
+  lint:
+    desc: "Run GolangCI-Lint"
+    cmds:
+      - golangci-lint run
+
+  # 🔹 DOCKER ─────────────────────────────────────────────────────────
+
+  docker-build:
+    desc: "Build Docker image for Load Balancer"
+    cmds:
+      - docker build -t neura-balancer -f Dockerfile .
+
+  docker-run:
+    desc: "Run Docker container"
+    cmds:
+      - docker run -p 8080:8080 --env-file .env neura-balancer
+
+  docker-clean:
+    desc: "Stop & remove Docker container"
+    cmds:
+      - docker stop $(docker ps -q --filter ancestor=neura-balancer) || true
+      - docker rm $(docker ps -aq --filter ancestor=neura-balancer) || true
+
+  docker-push:
+    desc: "Push Docker Image to Registry"
+    cmds:
+      - docker tag neura-balancer your-dockerhub-username/neura-balancer:latest
+      - docker push your-dockerhub-username/neura-balancer:latest
+
+  # 🔹 KUBERNETES ──────────────────────────────────────────────────────
+
+  k8s-deploy:
+    desc: "Deploy Kubernetes manifests"
+    cmds:
+      - kubectl apply -f deployments/k8s/
+
+  k8s-delete:
+    desc: "Delete Kubernetes deployment"
+    cmds:
+      - kubectl delete -f deployments/k8s/
+
+  k8s-status:
+    desc: "Check Kubernetes pod status"
+    cmds:
+      - kubectl get pods -o wide
+
+  k8s-logs:
+    desc: "Show logs of backend pod"
+    cmds:
+      - kubectl logs -l app=backend --tail=100 -f
+
+  k8s-restart:
+    desc: "Restart Kubernetes deployment"
+    cmds:
+      - kubectl rollout restart deployment backend
+
+  # 🔹 HELM ────────────────────────────────────────────────────────────
+
+  helm-deploy:
+    desc: "Deploy using Helm"
+    cmds:
+      - helm install neura-balancer deployments/helm/
+
+  helm-upgrade:
+    desc: "Upgrade Helm deployment"
+    cmds:
+      - helm upgrade neura-balancer deployments/helm/
+
+  helm-delete:
+    desc: "Uninstall Helm release"
+    cmds:
+      - helm uninstall neura-balancer
+
+  # 🔹 DATABASE ────────────────────────────────────────────────────────
+
+  db-migrate:
+    desc: "Run database migrations"
+    cmds:
+      - docker run --rm -v $(pwd)/migrations:/migrations migrate/migrate -path=/migrations -database 'postgres://admin:admin@localhost:5432/metrics_db?sslmode=disable' up
+
+  db-reset:
+    desc: "Reset database (delete & recreate tables)"
+    cmds:
+      - docker exec -it db psql -U admin -d metrics_db -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+
+  # 🔹 MACHINE LEARNING ────────────────────────────────────────────────
+
+  ml-train:
+    desc: "Train AI Load Balancer model"
+    cmds:
+      - python3 ml/training/train_model.py
+
+  ml-infer:
+    desc: "Run inference on AI model"
+    cmds:
+      - python3 ml/utils/inference.py
+
+  ml-serve:
+    desc: "Start AI model inference server"
+    cmds:
+      - go run ml/model-server/main.go
+
+  # 🔹 CI/CD (GitHub Actions) ─────────────────────────────────────────
+
+  ci:
+    desc: "Run CI pipeline (Lint, Test, Build)"
+    cmds:
+      - task: lint
+      - task: test
+      - task: build
+
+  cd:
+    desc: "Trigger GitHub Actions CD pipeline"
+    cmds:
+      - gh workflow run cd.yml -R your-repo/ai-load-balancer
+
+  # 🔹 CLEANUP ────────────────────────────────────────────────────────
+
+  clean:
+    desc: "Remove built binaries & artifacts"
+    cmds:
+      - rm -rf bin/
+      - rm -rf tmp/

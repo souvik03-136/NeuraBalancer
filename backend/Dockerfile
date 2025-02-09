@@ -1,26 +1,15 @@
-# Stage 1: Build
-FROM golang:1.21-alpine AS builder
+FROM golang:1.19 AS builder
 WORKDIR /app
-
-# Copy dependencies & download modules
-COPY go.mod go.sum ./
+COPY go.mod ./
+COPY go.sum ./
 RUN go mod download
-
-# Copy the source code
 COPY . .
+RUN go build -o main .
 
-# Build the Go binary
-RUN go build -o backend ./cmd/api
-
-# Stage 2: Run the application
+# Final image
 FROM alpine:latest
 WORKDIR /root/
-
-# Copy compiled binary
-COPY --from=builder /app/backend .
-
-# Expose the API port
+COPY --from=builder /app/main .
+COPY .env .
 EXPOSE 8080
-
-# Run the backend server
-CMD ["./backend"]
+CMD ["./main"]
