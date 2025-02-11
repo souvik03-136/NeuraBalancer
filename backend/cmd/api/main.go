@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/souvik03-136/neurabalancer/backend/internal/api"
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
 )
@@ -78,6 +79,10 @@ func main() {
 
 	// Initialize Echo framework
 	e := echo.New()
+	e.Use(middleware.Logger())  // Request Logging
+	e.Use(middleware.Recover()) // Panic Recovery
+	e.Use(middleware.CORS())    // CORS Middleware
+
 	lb := loadbalancer.NewLoadBalancer(strategy, serverList)
 
 	// Register API routes
