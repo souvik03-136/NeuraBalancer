@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
@@ -17,32 +18,46 @@ import (
 )
 
 func main() {
-	// Initialize Echo framework
-	e := echo.New()
-
 	// Seed the random number generator for Random Selection strategy
 	rand.Seed(time.Now().UnixNano())
 
-	// Read server list from ENV variable (or default to hardcoded servers)
+	// Define server list (from ENV or fallback to defaults)
 	serverListEnv := os.Getenv("SERVERS")
 	var serverList []string
 
 	if serverListEnv == "" {
 		log.Println("⚠️  No SERVERS environment variable found. Using default servers.")
-		serverList = []string{"http://server1", "http://server2", "http://server3"}
+		serverList = []string{"http://localhost:5000", "http://localhost:5001", "http://localhost:5002"}
 	} else {
 		serverList = strings.Split(serverListEnv, ",")
 	}
 
+	// Start backend servers in goroutines
+	for _, server := range serverList {
+		go startBackendServer(server)
+	}
+
+	// Wait a bit for servers to start
+	time.Sleep(2 * time.Second)
+
 	log.Println("🔗 Available Servers:", serverList)
 
-	// Load balancing strategies
+	// Check if servers are reachable
+	for _, server := range serverList {
+		if isServerUp(server) {
+			log.Printf("✅ Server %s is UP!", server)
+		} else {
+			log.Printf("❌ Server %s is DOWN!", server)
+		}
+	}
+
+	// Define available load balancing strategies
 	roundRobin := &loadbalancer.RoundRobinStrategy{}
 	leastConnections := &loadbalancer.LeastConnectionsStrategy{}
 	weightedRoundRobin := &loadbalancer.WeightedRoundRobinStrategy{}
 	randomSelection := &loadbalancer.RandomSelectionStrategy{}
 
-	// Select strategy from ENV
+	// Select strategy from ENV (default: Round Robin)
 	var strategy loadbalancer.Strategy
 	strategyEnv := strings.ToLower(os.Getenv("LB_STRATEGY"))
 
@@ -55,24 +70,26 @@ func main() {
 		strategy = randomSelection
 	default:
 		log.Println("⚠️  No valid strategy found. Defaulting to Round Robin.")
+		strategyEnv = "round_robin"
 		strategy = roundRobin
 	}
 
 	log.Println("🔄 Load Balancing Strategy:", strategyEnv)
 
-	// Create Load Balancer instance
+	// Initialize Echo framework
+	e := echo.New()
 	lb := loadbalancer.NewLoadBalancer(strategy, serverList)
 
 	// Register API routes
 	api.RegisterRoutes(e, lb)
 
-	// Define port
+	// Define port (from ENV or fallback to 8080)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	// Start server in a goroutine
+	// Start Load Balancer in a goroutine
 	go func() {
 		log.Println("🚀 Starting Load Balancer on port", port)
 		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
@@ -95,4 +112,40 @@ func main() {
 	}
 
 	log.Println("✅ Server exited cleanly")
+}
+
+// startBackendServer runs a simple backend server
+func startBackendServer(serverAddr string) {
+	parts := strings.Split(serverAddr, ":")
+	port := parts[len(parts)-1]
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "OK")
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Hello from server on port %s", port)
+	})
+
+	log.Printf("🚀 Backend server starting on port %s...\n", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		log.Fatalf("❌ Backend server failed on port %s: %v", port, err)
+	}
+}
+
+// isServerUp checks if a server is reachable with retries
+func isServerUp(server string) bool {
+	client := http.Client{Timeout: 5 * time.Second}
+	maxRetries := 3
+
+	for i := 0; i < maxRetries; i++ {
+		resp, err := client.Get(fmt.Sprintf("%s/health", server))
+		if err == nil && resp.StatusCode == http.StatusOK {
+			return true
+		}
+		log.Printf("🔍 Retrying connection to %s (attempt %d/%d)", server, i+1, maxRetries)
+		time.Sleep(2 * time.Second)
+	}
+	return false
 }
