@@ -4,14 +4,18 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
+	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
 )
 
 // Handler struct that wraps LoadBalancer
 type Handler struct {
-	LB *loadbalancer.LoadBalancer
+	LB        *loadbalancer.LoadBalancer
+	Collector *metrics.Collector // ✅ No Storage, only in-memory Collector
 }
 
 // Request struct
@@ -25,7 +29,9 @@ type Response struct {
 }
 
 // HandleRequest - Forwards request to all healthy servers (Broadcast)
+// HandleRequest - Forwards request to all healthy servers (Broadcast)
 func (h *Handler) HandleRequest(c echo.Context) error {
+	startTime := time.Now() // ✅ Start tracking response time
 	var wg sync.WaitGroup
 	responses := make([]map[string]interface{}, 0)
 	mu := sync.Mutex{}
@@ -41,6 +47,7 @@ func (h *Handler) HandleRequest(c echo.Context) error {
 
 	// If no healthy servers are found, return error
 	if len(healthyServers) == 0 {
+		h.Collector.RecordRequest(false, time.Since(startTime)) // ✅ Track failed request
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "No healthy servers available"})
 	}
 
@@ -54,6 +61,7 @@ func (h *Handler) HandleRequest(c echo.Context) error {
 			resp, err := http.Post(serverURL+"/process", "application/json", c.Request().Body)
 			if err != nil {
 				log.Printf("❌ Failed to forward request to %s: %v", serverURL, err)
+				h.Collector.RecordRequest(false, time.Since(startTime)) // ✅ Track failed request
 				return
 			}
 			defer resp.Body.Close()
@@ -66,17 +74,14 @@ func (h *Handler) HandleRequest(c echo.Context) error {
 			mu.Lock()
 			responses = append(responses, responseData)
 			mu.Unlock()
+
+			h.Collector.RecordRequest(true, time.Since(startTime)) // ✅ Track successful request
 		}(server.URL)
 	}
 
 	wg.Wait() // Wait for all requests to complete
 
 	return c.JSON(http.StatusOK, responses)
-}
-
-// App health check endpoint (for load balancer itself)
-func healthCheck(c echo.Context) error {
-	return c.JSON(http.StatusOK, map[string]string{"status": "load balancer running"})
 }
 
 // Load balancer health check (checks backend servers)
@@ -104,4 +109,10 @@ func (h *Handler) LoadBalancerHealthCheck(c echo.Context) error {
 		"healthy_servers":   healthyServers,
 		"unhealthy_servers": unhealthyServers,
 	})
+}
+
+// GetMetrics exposes Prometheus metrics
+func (h *Handler) GetMetrics(c echo.Context) error {
+	promhttp.Handler().ServeHTTP(c.Response(), c.Request()) // ✅ Expose Prometheus metrics
+	return nil
 }

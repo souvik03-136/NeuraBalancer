@@ -16,6 +16,7 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/souvik03-136/neurabalancer/backend/internal/api"
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
+	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
 )
 
 func main() {
@@ -83,10 +84,14 @@ func main() {
 	e.Use(middleware.Recover()) // Panic Recovery
 	e.Use(middleware.CORS())    // CORS Middleware
 
+	// Initialize Load Balancer
 	lb := loadbalancer.NewLoadBalancer(strategy, serverList)
 
-	// Register API routes
-	api.RegisterRoutes(e, lb)
+	// Initialize Metrics
+	collector := metrics.NewCollector()
+
+	// Register API routes with metrics integration
+	api.RegisterRoutes(e, lb, collector)
 
 	// Define port (from ENV or fallback to 8080)
 	port := os.Getenv("PORT")

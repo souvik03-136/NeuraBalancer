@@ -1,35 +1,46 @@
 package api
 
 import (
-	"log"
-	"net/http"
+	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
 )
 
-// CORSMiddleware handles Cross-Origin Resource Sharing (CORS) settings.
-func CORSMiddleware() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		ctx.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		ctx.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, UPDATE")
-		ctx.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
-		ctx.Writer.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
-		ctx.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-
-		if ctx.Request.Method == "OPTIONS" {
-			ctx.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-
-		ctx.Next()
-	}
+// CORSMiddleware sets up CORS headers
+func CORSMiddleware() echo.MiddlewareFunc {
+	return middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "OPTIONS", "PUT", "DELETE"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Type"},
+		AllowCredentials: true,
+	})
 }
 
-// RequestLogger logs details of each incoming request.
-func RequestLogger() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		log.Printf("➡️  [%s] %s - %s", ctx.Request.Method, ctx.Request.URL.Path, ctx.ClientIP())
-		ctx.Next()
-		log.Printf("⬅️  [%d] %s", ctx.Writer.Status(), ctx.Request.URL.Path)
+// RequestLogger logs each incoming request
+func RequestLogger() echo.MiddlewareFunc {
+	return middleware.LoggerWithConfig(middleware.LoggerConfig{
+		Format: "➡️  [${method}] ${uri} - ${remote_ip}\n⬅️  [${status}] ${uri}\n",
+	})
+}
+
+// ✅ MetricsMiddleware is now properly used in `RegisterRoutes`
+func MetricsMiddleware(collector *metrics.Collector) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			start := time.Now()
+			err := next(c)
+			duration := time.Since(start)
+
+			status := c.Response().Status
+			success := status >= 200 && status < 400 // 2xx and 3xx are successful
+
+			// Collect metrics
+			collector.RecordRequest(success, duration)
+
+			return err
+		}
 	}
 }
