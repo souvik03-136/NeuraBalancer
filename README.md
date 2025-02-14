@@ -183,7 +183,7 @@ kubectl apply -f deployments/k8s/
 │   │   │   ├── collector.go       # Fetches Prometheus metrics
 │   │   │   ├── storage.go         # Stores server stats in TimescaleDB
 │   │   ├── 📂 database/            # Database connections & queries
-│   │   │   ├── db.go              # MySQL/TimescaleDB connection
+│   │   │   ├── db.go              # postgreSQL/TimescaleDB connection
 │   │   │   ├── migrations.sql     # DB schema migrations
 │   │   ├── 📂 utils/               # Utility functions
 │   │   │   ├── logger.go          # Structured logging

@@ -28,9 +28,7 @@ func RegisterRoutes(e *echo.Echo, lb *loadbalancer.LoadBalancer, collector *metr
 	e.GET("/", handler.HealthCheck)                   // API health check
 	e.GET("/health", handler.LoadBalancerHealthCheck) // Load Balancer health check
 	e.POST("/request", handler.HandleRequest)         // Forward request to servers
-
-	// ✅ Add Metrics Endpoint
-	e.GET("/metrics", handler.GetMetrics)
+	e.GET("/metrics", handler.GetMetrics)             // Add Metrics Endpoint
 }
 
 // HealthCheck returns a basic status response
