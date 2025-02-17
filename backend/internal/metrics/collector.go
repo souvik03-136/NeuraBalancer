@@ -1,10 +1,12 @@
 package metrics
 
 import (
+	"log"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/souvik03-136/neurabalancer/backend/database"
 )
 
 // Collector collects request metrics.
@@ -45,7 +47,8 @@ func NewCollector() *Collector {
 }
 
 // RecordRequest logs request data.
-func (c *Collector) RecordRequest(success bool, duration time.Duration) {
+
+func (c *Collector) RecordRequest(serverID int, success bool, duration time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -57,4 +60,9 @@ func (c *Collector) RecordRequest(success bool, duration time.Duration) {
 	}
 
 	c.responseTime.Observe(duration.Seconds())
+	// Store metrics in TimescaleDB
+	if err := database.InsertRequest(serverID, success, duration); err != nil {
+		log.Printf("❌ Failed to log request in database: %v", err)
+	}
+
 }

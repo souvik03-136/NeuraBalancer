@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -12,10 +15,10 @@ import (
 	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
 )
 
-// Handler struct that wraps LoadBalancer
+// Handler struct wraps LoadBalancer and Collector
 type Handler struct {
 	LB        *loadbalancer.LoadBalancer
-	Collector *metrics.Collector // ✅ No Storage, only in-memory Collector
+	Collector *metrics.Collector
 }
 
 // Request struct
@@ -28,17 +31,39 @@ type Response struct {
 	Server string `json:"server"`
 }
 
-// HandleRequest - Forwards request to all healthy servers (Broadcast)
-// HandleRequest - Forwards request to all healthy servers (Broadcast)
+// HandleRequest forwards requests to all healthy servers (Broadcast)
 func (h *Handler) HandleRequest(c echo.Context) error {
-	startTime := time.Now() // ✅ Start tracking response time
-	var wg sync.WaitGroup
-	responses := make([]map[string]interface{}, 0)
-	mu := sync.Mutex{}
+	startTime := time.Now()
 
-	// Get all healthy servers
+	// ✅ Validate `server_id`
+	// ✅ Extract and validate `server_id`
+	serverIDStr := c.QueryParam("server_id")
+	if serverIDStr == "" {
+		log.Println("⚠️ Missing `server_id` in request")
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Missing server_id"})
+	}
+
+	serverID, err := strconv.Atoi(serverIDStr)
+	if err != nil {
+		log.Printf("❌ Invalid `server_id`: %v", err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid server_id"})
+	}
+
+	// ✅ Read the request body once
+	bodyBytes, err := io.ReadAll(c.Request().Body)
+	if err != nil {
+		log.Println("❌ Failed to read request body:", err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to read request body"})
+	}
+	c.Request().Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Reset the request body for further processing
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	responses := make([]map[string]interface{}, 0)
+
+	// Retrieve all healthy servers
 	servers := h.LB.GetAllServers()
-	healthyServers := []*loadbalancer.Server{}
+	healthyServers := make([]*loadbalancer.Server, 0, len(servers))
 	for _, server := range servers {
 		if server.Alive {
 			healthyServers = append(healthyServers, server)
@@ -47,36 +72,42 @@ func (h *Handler) HandleRequest(c echo.Context) error {
 
 	// If no healthy servers are found, return error
 	if len(healthyServers) == 0 {
-		h.Collector.RecordRequest(false, time.Since(startTime)) // ✅ Track failed request
+		h.Collector.RecordRequest(serverID, false, time.Since(startTime))
+		log.Println("❌ No healthy servers available")
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "No healthy servers available"})
 	}
 
 	// Broadcast request to all healthy servers
 	for _, server := range healthyServers {
 		wg.Add(1)
-		go func(serverURL string) {
+		go func(server *loadbalancer.Server) {
 			defer wg.Done()
 
-			// Forward the request
-			resp, err := http.Post(serverURL+"/process", "application/json", c.Request().Body)
+			resp, err := http.Post(server.URL+"/process", "application/json", bytes.NewReader(bodyBytes))
 			if err != nil {
-				log.Printf("❌ Failed to forward request to %s: %v", serverURL, err)
-				h.Collector.RecordRequest(false, time.Since(startTime)) // ✅ Track failed request
+				log.Printf("❌ Failed to forward request to %s: %v", server.URL, err)
+				h.Collector.RecordRequest(serverID, false, time.Since(startTime))
 				return
 			}
 			defer resp.Body.Close()
 
-			// Collect responses
-			responseData := map[string]interface{}{
-				"server": serverURL,
-				"status": resp.StatusCode,
+			// ✅ Read response safely
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				log.Printf("⚠️ Failed to read response from %s: %v", server.URL, err)
 			}
+
+			// Collect response data
 			mu.Lock()
-			responses = append(responses, responseData)
+			responses = append(responses, map[string]interface{}{
+				"server": server.URL,
+				"status": resp.StatusCode,
+				"body":   string(respBody),
+			})
 			mu.Unlock()
 
-			h.Collector.RecordRequest(true, time.Since(startTime)) // ✅ Track successful request
-		}(server.URL)
+			h.Collector.RecordRequest(serverID, true, time.Since(startTime))
+		}(server)
 	}
 
 	wg.Wait() // Wait for all requests to complete
@@ -84,12 +115,12 @@ func (h *Handler) HandleRequest(c echo.Context) error {
 	return c.JSON(http.StatusOK, responses)
 }
 
-// Load balancer health check (checks backend servers)
+// LoadBalancerHealthCheck provides the health status of backend servers
 func (h *Handler) LoadBalancerHealthCheck(c echo.Context) error {
 	healthyServers := []string{}
 	unhealthyServers := []string{}
 
-	// Get a list of healthy/unhealthy servers
+	// Classify servers into healthy and unhealthy lists
 	for _, server := range h.LB.GetAllServers() {
 		if server.Alive {
 			healthyServers = append(healthyServers, server.URL)
@@ -98,7 +129,7 @@ func (h *Handler) LoadBalancerHealthCheck(c echo.Context) error {
 		}
 	}
 
-	// Always return 200 for LB health, but mention if no backend servers are available
+	// Determine response status
 	statusCode := http.StatusOK
 	if len(healthyServers) == 0 {
 		statusCode = http.StatusServiceUnavailable
@@ -113,6 +144,7 @@ func (h *Handler) LoadBalancerHealthCheck(c echo.Context) error {
 
 // GetMetrics exposes Prometheus metrics
 func (h *Handler) GetMetrics(c echo.Context) error {
-	promhttp.Handler().ServeHTTP(c.Response(), c.Request()) // ✅ Expose Prometheus metrics
+	promHandler := promhttp.Handler()
+	promHandler.ServeHTTP(c.Response(), c.Request())
 	return nil
 }

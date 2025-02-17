@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/souvik03-136/neurabalancer/backend/database"
 )
 
 // Server struct to track health status
 type Server struct {
+	ID     int
 	URL    string
 	Alive  bool
 	Weight int // Added for Weighted Round Robin
@@ -168,4 +171,15 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 	// Respond to client
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Broadcast complete to all servers\n" + fmt.Sprintf("%v", responses)))
+}
+
+// SelectBackend dynamically chooses the best backend server.
+func SelectBackend() string {
+	serverIP, err := database.GetLeastLoadedServer()
+	if err != nil {
+		log.Println("⚠️ Error fetching backend server:", err)
+		return "" // Fallback strategy (e.g., round robin)
+	}
+	log.Println("🔀 Routing request to:", serverIP)
+	return serverIP
 }

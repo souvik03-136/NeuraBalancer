@@ -14,12 +14,19 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/souvik03-136/neurabalancer/backend/database"
 	"github.com/souvik03-136/neurabalancer/backend/internal/api"
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
 	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
 )
 
 func main() {
+	// Initialize Database
+	if err := database.InitDB(); err != nil {
+		log.Fatalf("❌ Database initialization failed: %v", err)
+	}
+	defer database.CloseDB()
+
 	// Seed the random number generator for Random Selection strategy
 	rand.Seed(time.Now().UnixNano())
 

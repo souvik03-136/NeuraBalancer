@@ -1,6 +1,9 @@
 package api
 
 import (
+	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -22,11 +25,11 @@ func CORSMiddleware() echo.MiddlewareFunc {
 // RequestLogger logs each incoming request
 func RequestLogger() echo.MiddlewareFunc {
 	return middleware.LoggerWithConfig(middleware.LoggerConfig{
-		Format: "➡️  [${method}] ${uri} - ${remote_ip}\n⬅️  [${status}] ${uri}\n",
+		Format: "🕒 ${time_rfc3339} ➡️ [${method}] ${uri} - ${remote_ip}\n⬅️  [${status}] ${uri}\n",
 	})
 }
 
-// ✅ MetricsMiddleware is now properly used in `RegisterRoutes`
+// ✅ Improved MetricsMiddleware for safer handling of `serverID`
 func MetricsMiddleware(collector *metrics.Collector) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
@@ -35,10 +38,22 @@ func MetricsMiddleware(collector *metrics.Collector) echo.MiddlewareFunc {
 			duration := time.Since(start)
 
 			status := c.Response().Status
-			success := status >= 200 && status < 400 // 2xx and 3xx are successful
+			success := status >= 200 && status < 400 // 2xx and 3xx are considered successful
+
+			// Extract server ID from request headers
+			serverIDStr := strings.TrimSpace(c.Request().Header.Get("X-Server-ID"))
+			serverID := -1 // Default unknown server ID
+
+			if serverIDStr != "" {
+				if id, convErr := strconv.Atoi(serverIDStr); convErr == nil {
+					serverID = id
+				} else {
+					log.Printf("⚠️ Invalid server ID received: %q, error: %v", serverIDStr, convErr)
+				}
+			}
 
 			// Collect metrics
-			collector.RecordRequest(success, duration)
+			collector.RecordRequest(serverID, success, duration)
 
 			return err
 		}
