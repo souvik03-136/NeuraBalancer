@@ -46,8 +46,7 @@ func NewCollector() *Collector {
 	return c
 }
 
-// RecordRequest logs request data.
-
+// RecordRequest logs request data and updates server load.
 func (c *Collector) RecordRequest(serverID int, success bool, duration time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -60,9 +59,15 @@ func (c *Collector) RecordRequest(serverID int, success bool, duration time.Dura
 	}
 
 	c.responseTime.Observe(duration.Seconds())
+
 	// Store metrics in TimescaleDB
 	if err := database.InsertRequest(serverID, success, duration); err != nil {
 		log.Printf("❌ Failed to log request in database: %v", err)
 	}
 
+	// Update server load (increase by 1)
+	err := database.UpdateServerLoad(serverID, 1)
+	if err != nil {
+		log.Printf("❌ Failed to update server load: %v", err)
+	}
 }

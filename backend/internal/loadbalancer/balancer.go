@@ -1,11 +1,13 @@
 package loadbalancer
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,11 +71,16 @@ func (lb *LoadBalancer) GetServer() (string, error) {
 
 // checkServerHealth pings the server's /health endpoint
 func (s *Server) checkServerHealth() bool {
-	client := http.Client{
-		Timeout: 5 * time.Second, // Consistent with main.go
+
+	client := http.Client{Timeout: 5 * time.Second}
+
+	// Ensure URL has scheme
+	healthURL := s.URL + "/health"
+	if !strings.HasPrefix(healthURL, "http") {
+		healthURL = "http://" + healthURL
 	}
 
-	resp, err := client.Get(s.URL + "/health")
+	resp, err := client.Get(healthURL)
 	if err != nil {
 		log.Printf("❌ Server %s is DOWN: %v\n", s.URL, err)
 		return false
@@ -142,13 +149,24 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the request body once and store it in memory
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("❌ Failed to read request body: %v", err)
+		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+
 	wg.Add(len(healthyServers))
 
 	for _, server := range healthyServers {
 		go func(server *Server) {
 			defer wg.Done()
 
-			resp, err := http.Post(server.URL+r.URL.Path, r.Header.Get("Content-Type"), r.Body)
+			// Create a new request with a cloned body
+			bodyReader := bytes.NewReader(bodyBytes)
+			resp, err := http.Post(server.URL+r.URL.Path, r.Header.Get("Content-Type"), bodyReader)
 			if err != nil {
 				log.Printf("❌ Failed to forward request to %s: %v", server.URL, err)
 				return

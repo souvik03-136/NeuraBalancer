@@ -41,6 +41,16 @@ func main() {
 		serverList = strings.Split(serverListEnv, ",")
 	}
 
+	// Register servers in database
+	for _, server := range serverList {
+		err := database.RegisterServer(server) // Auto-register in DB
+		if err != nil {
+			log.Printf("⚠️ Failed to register server %s in DB: %v", server, err)
+		} else {
+			log.Printf("✅ Server %s registered in DB", server)
+		}
+	}
+
 	// Start backend servers in goroutines
 	for _, server := range serverList {
 		go startBackendServer(server)
@@ -91,8 +101,8 @@ func main() {
 	e.Use(middleware.Recover()) // Panic Recovery
 	e.Use(middleware.CORS())    // CORS Middleware
 
-	// Initialize Load Balancer
-	lb := loadbalancer.NewLoadBalancer(strategy, serverList)
+	// Initialize Load Balancer with fallback
+	lb := loadbalancer.NewLoadBalancer(strategy, fallbackServerList(serverList))
 
 	// Initialize Metrics
 	collector := metrics.NewCollector()
@@ -165,4 +175,14 @@ func isServerUp(server string) bool {
 		time.Sleep(2 * time.Second)
 	}
 	return false
+}
+
+// fallbackServerList provides a fallback if DB queries fail
+func fallbackServerList(serverList []string) []string {
+	servers, err := database.GetAvailableServers()
+	if err != nil || len(servers) == 0 {
+		log.Println("⚠️ No servers in DB, falling back to in-memory list.")
+		return serverList
+	}
+	return servers
 }
