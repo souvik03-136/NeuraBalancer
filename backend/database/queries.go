@@ -2,7 +2,8 @@ package database
 
 import (
 	"log"
-	"strings"
+	"net/url"
+	"strconv"
 	"time"
 )
 
@@ -79,16 +80,43 @@ func GetAvailableServers() ([]string, error) {
 	return servers, nil
 }
 
+// RegisterServer registers a server in the database.
 func RegisterServer(server string) error {
-	// Split into parts like ip, port, etc.
-	parts := strings.Split(server, ":")
-	ipAddress := parts[0]
-	port := parts[1]
+	// Parse the server URL
+	parsed, err := url.Parse(server)
+	if err != nil {
+		log.Printf("❌ Invalid server URL: %s, error: %v", server, err)
+		return err
+	}
+
+	// Extract IP address and port
+	ipAddress := parsed.Hostname()
+	portStr := parsed.Port()
+	if portStr == "" {
+		portStr = "80" // Default to port 80 if no port is specified
+	}
+
+	// Convert port to integer
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Printf("❌ Invalid port number: %s", portStr)
+		return err
+	}
+
 	query := `
-	INSERT INTO servers (name, ip_address, port, status, is_active, created_at)
-	VALUES ($1, $2, $3, $4, $5, NOW())
-	ON CONFLICT (ip_address, port) 
-	DO UPDATE SET status = EXCLUDED.status, is_active = EXCLUDED.is_active`
-	_, err := DB.Exec(query, server, ipAddress, port, "active", 0, true)
-	return err
+		INSERT INTO servers (name, ip_address, port, status, is_active, created_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (ip_address, port) 
+		DO UPDATE SET status = EXCLUDED.status, is_active = EXCLUDED.is_active
+	`
+
+	// Execute the query with the correct parameters
+	_, err = DB.Exec(query, server, ipAddress, port, "active", true)
+	if err != nil {
+		log.Printf("❌ Failed to register/update server in DB: %v", err)
+		return err
+	}
+
+	log.Printf("✅ Server %s registered/updated successfully", server)
+	return nil
 }
