@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/souvik03-136/neurabalancer/backend/database"
+	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
 )
 
 // Server struct to track health status
@@ -27,12 +28,14 @@ type LoadBalancer struct {
 	servers  []*Server
 	mu       sync.Mutex
 	strategy Strategy
+	metrics  *metrics.Collector // Add a metrics collector
 }
 
 // NewLoadBalancer initializes a load balancer with a given strategy
 func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 	lb := &LoadBalancer{
 		strategy: strategy,
+		metrics:  metrics.NewCollector(), // Initialize the metrics collector
 	}
 
 	// Initialize servers with default weight (1)
@@ -71,7 +74,6 @@ func (lb *LoadBalancer) GetServer() (string, error) {
 
 // checkServerHealth pings the server's /health endpoint
 func (s *Server) checkServerHealth() bool {
-
 	client := http.Client{Timeout: 5 * time.Second}
 
 	// Ensure URL has scheme
@@ -150,13 +152,8 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the request body once and store it in memory
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Printf("❌ Failed to read request body: %v", err)
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
-		return
-	}
-	defer r.Body.Close()
+	bodyBytes, _ := io.ReadAll(r.Body)
+	r.Body.Close()
 
 	wg.Add(len(healthyServers))
 
@@ -166,9 +163,14 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 
 			// Create a new request with a cloned body
 			bodyReader := bytes.NewReader(bodyBytes)
+			startTime := time.Now()
 			resp, err := http.Post(server.URL+r.URL.Path, r.Header.Get("Content-Type"), bodyReader)
+			responseTime := time.Since(startTime)
+
 			if err != nil {
 				log.Printf("❌ Failed to forward request to %s: %v", server.URL, err)
+				// Record failed request
+				lb.metrics.RecordRequest(server.ID, false, responseTime)
 				return
 			}
 			defer resp.Body.Close()
@@ -178,6 +180,9 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			responses = append(responses, fmt.Sprintf("✅ %s: %s", server.URL, string(body)))
 			mu.Unlock()
+
+			// Record successful request
+			lb.metrics.RecordRequest(server.ID, true, responseTime)
 
 			log.Printf("✅ Request forwarded to %s", server.URL)
 		}(server)

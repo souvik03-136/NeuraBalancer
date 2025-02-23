@@ -30,11 +30,14 @@ func GetLeastLoadedServer() (string, error) {
 
 // InsertMetrics logs server metrics.
 func InsertMetrics(serverID int, cpu float64, mem float64, count int, successRate float64) error {
-	_, err := DB.Exec(`
-        INSERT INTO metrics (server_id, cpu_usage, memory_usage, request_count, success_rate, timestamp)
-        VALUES ($1, $2, $3, $4, $5, NOW())`,
+	_, err := DB.Exec(
+		`INSERT INTO metrics (server_id, cpu_usage, memory_usage, request_count, success_rate, timestamp)
+		VALUES ($1, $2, $3, $4, $5, NOW())`,
 		serverID, cpu, mem, count, successRate,
 	)
+	if err != nil {
+		log.Printf("❌ Failed to insert metrics for server ID %d: %v", serverID, err)
+	}
 	return err
 }
 

@@ -18,32 +18,44 @@ type Collector struct {
 	responseTime       prometheus.Histogram
 }
 
-// NewCollector initializes and returns a new Collector.
+var (
+	collectorInstance *Collector
+	once              sync.Once
+)
+
+// NewCollector initializes and returns a new Collector (singleton).
 func NewCollector() *Collector {
-	c := &Collector{
-		totalRequests: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "http_total_requests",
-			Help: "Total number of HTTP requests",
-		}),
-		successfulRequests: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "http_successful_requests",
-			Help: "Number of successful HTTP requests",
-		}),
-		failedRequests: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "http_failed_requests",
-			Help: "Number of failed HTTP requests",
-		}),
-		responseTime: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    "http_response_time_seconds",
-			Help:    "Histogram of response times",
-			Buckets: prometheus.DefBuckets,
-		}),
-	}
+	once.Do(func() {
+		collectorInstance = &Collector{
+			totalRequests: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "http_total_requests",
+				Help: "Total number of HTTP requests",
+			}),
+			successfulRequests: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "http_successful_requests",
+				Help: "Number of successful HTTP requests",
+			}),
+			failedRequests: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "http_failed_requests",
+				Help: "Number of failed HTTP requests",
+			}),
+			responseTime: prometheus.NewHistogram(prometheus.HistogramOpts{
+				Name:    "http_response_time_seconds",
+				Help:    "Histogram of response times",
+				Buckets: prometheus.DefBuckets,
+			}),
+		}
 
-	// Register metrics with Prometheus
-	prometheus.MustRegister(c.totalRequests, c.successfulRequests, c.failedRequests, c.responseTime)
+		// Register metrics with Prometheus
+		prometheus.MustRegister(
+			collectorInstance.totalRequests,
+			collectorInstance.successfulRequests,
+			collectorInstance.failedRequests,
+			collectorInstance.responseTime,
+		)
+	})
 
-	return c
+	return collectorInstance
 }
 
 // RecordRequest logs request data and updates server load.

@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/souvik03-136/neurabalancer/backend/database"
 	"github.com/souvik03-136/neurabalancer/backend/internal/api"
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
@@ -101,14 +103,17 @@ func main() {
 	e.Use(middleware.Recover()) // Panic Recovery
 	e.Use(middleware.CORS())    // CORS Middleware
 
+	// Initialize Metrics (singleton)
+	collector := metrics.NewCollector()
+
 	// Initialize Load Balancer with fallback
 	lb := loadbalancer.NewLoadBalancer(strategy, fallbackServerList(serverList))
 
-	// Initialize Metrics
-	collector := metrics.NewCollector()
-
 	// Register API routes with metrics integration
 	api.RegisterRoutes(e, lb, collector)
+
+	// Expose Prometheus metrics endpoint
+	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
 
 	// Define port (from ENV or fallback to 8080)
 	port := os.Getenv("PORT")
@@ -143,8 +148,15 @@ func main() {
 
 // startBackendServer runs a simple backend server
 func startBackendServer(serverAddr string) {
-	parts := strings.Split(serverAddr, ":")
-	port := parts[len(parts)-1]
+	parsed, err := url.Parse(serverAddr)
+	if err != nil {
+		log.Fatalf("❌ Invalid server URL: %s, error: %v", serverAddr, err)
+	}
+
+	port := parsed.Port()
+	if port == "" {
+		port = "80" // Default to port 80 if no port is specified
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
