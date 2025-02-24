@@ -37,8 +37,10 @@ func InsertMetrics(serverID int, cpu float64, mem float64, count int, successRat
 	)
 	if err != nil {
 		log.Printf("❌ Failed to insert metrics for server ID %d: %v", serverID, err)
+		return err
 	}
-	return err
+	log.Printf("✅ Metrics inserted successfully for server ID %d", serverID)
+	return nil
 }
 
 // UpdateServerStatus updates the is_active status of a server.
@@ -122,4 +124,31 @@ func RegisterServer(server string) error {
 
 	log.Printf("✅ Server %s registered/updated successfully", server)
 	return nil
+}
+
+// ServerExists checks if a server with the given ID exists in the database
+// ServerExists checks if a server with the given ID exists in the database
+func ServerExists(serverID int) (bool, error) {
+	var exists bool
+	err := DB.QueryRow("SELECT EXISTS(SELECT 1 FROM servers WHERE id = $1)", serverID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+func GetServerID(serverURL string) (int, error) {
+	parsed, err := url.Parse(serverURL)
+	if err != nil {
+		return -1, err
+	}
+
+	var serverID int
+	err = DB.QueryRow(`
+        SELECT id FROM servers 
+        WHERE ip_address = $1 AND port = $2`,
+		parsed.Hostname(), parsed.Port(),
+	).Scan(&serverID)
+
+	return serverID, err
 }

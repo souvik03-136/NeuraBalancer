@@ -2,6 +2,7 @@ package loadbalancer
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -35,17 +36,27 @@ type LoadBalancer struct {
 func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 	lb := &LoadBalancer{
 		strategy: strategy,
-		metrics:  metrics.NewCollector(), // Initialize the metrics collector
+		metrics:  metrics.NewCollector(),
 	}
 
-	// Initialize servers with default weight (1)
-	for _, url := range serverURLs {
-		lb.servers = append(lb.servers, &Server{URL: url, Alive: true, Weight: 1})
+	// Fetch server IDs from the database
+	for _, serverURL := range serverURLs {
+		serverID, err := database.GetServerID(serverURL)
+		if err != nil {
+			log.Printf("⚠️ Failed to get ID for server %s: %v", serverURL, err)
+			continue
+		}
+
+		server := &Server{
+			ID:     serverID, // Use the actual database ID
+			URL:    serverURL,
+			Alive:  true,
+			Weight: 1,
+		}
+		lb.servers = append(lb.servers, server)
 	}
 
-	// Start periodic health checks
 	go lb.startHealthChecks()
-
 	return lb
 }
 
@@ -136,8 +147,9 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 	var mu sync.Mutex
 	var responses []string
 
+	// Get healthy servers with proper locking
 	lb.mu.Lock()
-	healthyServers := []*Server{}
+	healthyServers := make([]*Server, 0, len(lb.servers))
 	for _, server := range lb.servers {
 		if server.Alive {
 			healthyServers = append(healthyServers, server)
@@ -151,26 +163,28 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the request body once and store it in memory
+	// Clone request body and headers
 	bodyBytes, _ := io.ReadAll(r.Body)
-	r.Body.Close()
+	defer r.Body.Close()
 
 	wg.Add(len(healthyServers))
 
 	for _, server := range healthyServers {
-		go func(server *Server) {
+		go func(s *Server) {
 			defer wg.Done()
 
-			// Create a new request with a cloned body
-			bodyReader := bytes.NewReader(bodyBytes)
+			// Create new request with proper context
+			ctx := context.WithValue(r.Context(), "lb_server_id", s.ID)
+			req, _ := http.NewRequestWithContext(ctx, r.Method, s.URL+r.URL.Path, bytes.NewReader(bodyBytes))
+			req.Header = r.Header.Clone()
+
 			startTime := time.Now()
-			resp, err := http.Post(server.URL+r.URL.Path, r.Header.Get("Content-Type"), bodyReader)
+			resp, err := http.DefaultClient.Do(req)
 			responseTime := time.Since(startTime)
 
 			if err != nil {
-				log.Printf("❌ Failed to forward request to %s: %v", server.URL, err)
-				// Record failed request
-				lb.metrics.RecordRequest(server.ID, false, responseTime)
+				log.Printf("❌ Failed to forward to %s: %v", s.URL, err)
+				lb.metrics.RecordRequest(s.ID, false, responseTime)
 				return
 			}
 			defer resp.Body.Close()
@@ -178,22 +192,20 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(resp.Body)
 
 			mu.Lock()
-			responses = append(responses, fmt.Sprintf("✅ %s: %s", server.URL, string(body)))
+			responses = append(responses, fmt.Sprintf("✅ %s: %s", s.URL, string(body)))
 			mu.Unlock()
 
-			// Record successful request
-			lb.metrics.RecordRequest(server.ID, true, responseTime)
-
-			log.Printf("✅ Request forwarded to %s", server.URL)
+			lb.metrics.RecordRequest(s.ID, true, responseTime)
+			log.Printf("✅ Successfully forwarded to %s", s.URL)
 		}(server)
 	}
 
-	// Wait for all requests to complete
 	wg.Wait()
 
-	// Respond to client
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Broadcast complete to all servers\n" + fmt.Sprintf("%v", responses)))
+	w.Write([]byte(fmt.Sprintf("Broadcast complete to %d servers:\n%s",
+		len(healthyServers),
+		strings.Join(responses, "\n"))))
 }
 
 // SelectBackend dynamically chooses the best backend server.

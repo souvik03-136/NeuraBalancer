@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -16,6 +17,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/shirou/gopsutil/cpu"
+	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/souvik03-136/neurabalancer/backend/database"
 	"github.com/souvik03-136/neurabalancer/backend/internal/api"
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
@@ -158,11 +161,35 @@ func startBackendServer(serverAddr string) {
 		port = "80" // Default to port 80 if no port is specified
 	}
 
+	// Create the mux router first
 	mux := http.NewServeMux()
+
+	// Add metrics endpoint
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		// Get CPU usage (1-second average)
+		cpuPercents, _ := cpu.Percent(time.Second, false)
+		cpuUsage := 0.0
+		if len(cpuPercents) > 0 {
+			cpuUsage = cpuPercents[0]
+		}
+
+		// Get memory usage
+		memInfo, _ := mem.VirtualMemory()
+		memUsage := memInfo.UsedPercent
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]float64{
+			"cpu_usage":    cpuUsage,
+			"memory_usage": memUsage,
+		})
+	})
+
+	// Add other endpoints
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "OK")
 	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello from server on port %s", port)
 	})

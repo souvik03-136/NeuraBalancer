@@ -1,9 +1,6 @@
 package api
 
 import (
-	"log"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -33,27 +30,21 @@ func RequestLogger() echo.MiddlewareFunc {
 func MetricsMiddleware(collector *metrics.Collector) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			// Skip system endpoints
+			if c.Path() == "/health" || c.Path() == "/metrics" {
+				return next(c)
+			}
+
 			start := time.Now()
 			err := next(c)
 			duration := time.Since(start)
 
-			status := c.Response().Status
-			success := status >= 200 && status < 400 // 2xx and 3xx are considered successful
-
-			// Extract server ID from request headers
-			serverIDStr := strings.TrimSpace(c.Request().Header.Get("X-Server-ID"))
-			serverID := -1 // Default unknown server ID
-
-			if serverIDStr != "" {
-				if id, convErr := strconv.Atoi(serverIDStr); convErr == nil {
-					serverID = id
-				} else {
-					log.Printf("⚠️ Invalid server ID received: %q, error: %v", serverIDStr, convErr)
-				}
+			// Get server ID from load balancer context
+			if serverID, ok := c.Request().Context().Value("lb_server_id").(int); ok && serverID > 0 {
+				status := c.Response().Status
+				success := status >= 200 && status < 400
+				collector.RecordRequest(serverID, success, duration)
 			}
-
-			// Collect metrics
-			collector.RecordRequest(serverID, success, duration)
 
 			return err
 		}

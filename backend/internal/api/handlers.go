@@ -5,7 +5,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -33,97 +32,77 @@ type Response struct {
 }
 
 // HandleRequest forwards requests to all healthy servers (Broadcast)
+// HandleRequest forwards requests to all healthy servers (Broadcast)
 func (h *Handler) HandleRequest(c echo.Context) error {
 	startTime := time.Now()
 
-	// ✅ Validate `server_id`
-	// ✅ Extract and validate `server_id`
-	serverIDStr := c.QueryParam("server_id")
-	if serverIDStr == "" {
-		log.Println("⚠️ Missing `server_id` in request")
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Missing server_id"})
-	}
-
-	serverID, err := strconv.Atoi(serverIDStr)
-	if err != nil {
-		log.Printf("❌ Invalid `server_id`: %v", err)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid server_id"})
-	}
-
-	// ✅ Read the request body once
+	// Read the request body once
 	bodyBytes, err := io.ReadAll(c.Request().Body)
 	if err != nil {
 		log.Println("❌ Failed to read request body:", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to read request body"})
 	}
-	c.Request().Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Reset the request body for further processing
+	c.Request().Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	responses := make([]map[string]interface{}, 0)
 	var failedServers []map[string]interface{}
 
-	// Retrieve all healthy servers
+	// Get all servers from load balancer
 	servers := h.LB.GetAllServers()
-	healthyServers := make([]*loadbalancer.Server, 0, len(servers))
+
+	// Filter healthy servers
+	healthyServers := make([]*loadbalancer.Server, 0)
 	for _, server := range servers {
 		if server.Alive {
 			healthyServers = append(healthyServers, server)
 		}
 	}
 
-	// If no healthy servers are found, return error
 	if len(healthyServers) == 0 {
-		h.Collector.RecordRequest(serverID, false, time.Since(startTime))
 		log.Println("❌ No healthy servers available")
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "No healthy servers available"})
 	}
 
-	// Broadcast request to all healthy servers
+	// Broadcast to all healthy servers
 	for _, server := range healthyServers {
 		wg.Add(1)
-		go func(server *loadbalancer.Server) {
+		go func(s *loadbalancer.Server) {
 			defer wg.Done()
 
-			resp, err := http.Post(server.URL+"/process", "application/json", bytes.NewReader(bodyBytes))
-			if err != nil {
-				log.Printf("❌ Failed to forward request to %s: %v", server.URL, err)
+			// Forward request
+			resp, err := http.Post(s.URL+"/process", "application/json", bytes.NewReader(bodyBytes))
+			success := err == nil
+			responseTime := time.Since(startTime)
 
-				// Track failure
-				mu.Lock()
+			// Record metrics with actual server ID
+			h.Collector.RecordRequest(s.ID, success, responseTime)
+
+			// Handle response
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
 				failedServers = append(failedServers, map[string]interface{}{
-					"server": server.URL,
+					"server": s.URL,
 					"error":  err.Error(),
 				})
-				mu.Unlock()
-
-				h.Collector.RecordRequest(serverID, false, time.Since(startTime))
 				return
 			}
+
 			defer resp.Body.Close()
-
-			// ✅ Read response safely
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				log.Printf("⚠️ Failed to read response from %s: %v", server.URL, err)
-			}
-
-			// Collect response data
-			mu.Lock()
+			body, _ := io.ReadAll(resp.Body)
 			responses = append(responses, map[string]interface{}{
-				"server": server.URL,
+				"server": s.URL,
 				"status": resp.StatusCode,
-				"body":   string(respBody),
+				"body":   string(body),
 			})
-			mu.Unlock()
-
-			h.Collector.RecordRequest(serverID, true, time.Since(startTime))
 		}(server)
 	}
 
-	wg.Wait() // Wait for all requests to complete
+	wg.Wait()
 
-	// Return the responses, including failed server information
 	return c.JSON(http.StatusOK, map[string]interface{}{
 		"responses":      responses,
 		"failed_servers": failedServers,
