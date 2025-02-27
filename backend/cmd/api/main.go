@@ -166,21 +166,25 @@ func startBackendServer(serverAddr string) {
 
 	// Add metrics endpoint
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		// Get CPU usage (1-second average)
-		cpuPercents, _ := cpu.Percent(time.Second, false)
-		cpuUsage := 0.0
-		if len(cpuPercents) > 0 {
-			cpuUsage = cpuPercents[0]
+		// Get real-time memory stats
+		memStat, err := mem.VirtualMemory()
+		if err != nil {
+			log.Printf("❌ Memory stats error: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
 
-		// Get memory usage
-		memInfo, _ := mem.VirtualMemory()
-		memUsage := memInfo.UsedPercent
+		// Get CPU usage with proper sampling
+		cpuPercents, err := cpu.Percent(500*time.Millisecond, false)
+		if err != nil || len(cpuPercents) == 0 {
+			log.Printf("⚠️ CPU measurement failed: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 
-		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]float64{
-			"cpu_usage":    cpuUsage,
-			"memory_usage": memUsage,
+			"cpu_usage":    cpuPercents[0],
+			"memory_usage": memStat.UsedPercent, // Actual usage percentage
 		})
 	})
 
