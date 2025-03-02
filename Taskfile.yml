@@ -1,32 +1,48 @@
 version: '3'
 
 tasks:
-
-  # 🔹 GO BUILD & RUN ─────────────────────────────────────────────────
-
+  # 🔹 LOAD BALANCER ────────────────────────────────────────────────
   build:
-    desc: "Build the Go Load Balancer binary"
+    desc: "Build Load Balancer"
     cmds:
       - go build -o bin/neura-balancer backend/cmd/api/main.go
-    sources:
-      - backend/cmd/api/main.go
-    generates:
-      - bin/neura-balancer
 
   run:
-    desc: "Run the Load Balancer locally"
+    desc: "Run Load Balancer"
     cmds:
       - go run backend/cmd/api/main.go
 
-  test:
-    desc: "Run unit tests for the Go backend"
+  # 🔹 BACKEND SERVERS ───────────────────────────────────────────────
+  build-servers:
+    desc: "Build all backend servers"
     cmds:
-      - go test -v ./test/...
+      - go build -o bin/server5000.exe backend/cmd/server5000/main.go
+      - go build -o bin/server5001.exe backend/cmd/server5001/main.go
+      - go build -o bin/server5002.exe backend/cmd/server5002/main.go
 
-  lint:
-    desc: "Run GolangCI-Lint"
+  run-servers:
+    desc: "Run all backend servers"
     cmds:
-      - golangci-lint run
+      - powershell -Command "Start-Process -NoNewWindow .\bin\server5000.exe"
+      - powershell -Command "Start-Process -NoNewWindow .\bin\server5001.exe"
+      - powershell -Command "Start-Process -NoNewWindow .\bin\server5002.exe"
+      - timeout /t 2
+
+  start-all:
+    desc: "Start entire system"
+    cmds:
+      - task: build-servers
+      - task: build
+      - task: run-servers
+      - task: run
+
+  kill-servers:
+    desc: "Kill all backend servers"
+    cmds:
+      - taskkill /IM server5000.exe /F /T || true
+      - taskkill /IM server5001.exe /F /T || true
+      - taskkill /IM server5002.exe /F /T || true
+
 
   # 🔹 DOCKER ─────────────────────────────────────────────────────────
 
@@ -144,5 +160,5 @@ tasks:
   clean:
     desc: "Remove built binaries & artifacts"
     cmds:
-      - rm -rf bin/
-      - rm -rf tmp/
+      - del /Q bin\*.exe
+      - rmdir /S /Q tmp

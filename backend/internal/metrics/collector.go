@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/shirou/gopsutil/cpu"
-	"github.com/shirou/gopsutil/mem"
 	"github.com/souvik03-136/neurabalancer/backend/database"
 )
 
@@ -68,7 +66,7 @@ func (c *Collector) RecordRequest(serverID int, success bool, duration time.Dura
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Update Prometheus metrics
+	// Update Prometheus metrics FIRST
 	c.totalRequests.Inc()
 	if success {
 		c.successfulRequests.Inc()
@@ -94,55 +92,43 @@ func (c *Collector) RecordRequest(serverID int, success bool, duration time.Dura
 		return
 	}
 
-	// Get actual server metrics with enhanced validation
-	cpuUsage, memoryUsage, err := getActualServerMetrics(serverID)
-	if err != nil {
-		log.Printf("⚠️ Failed to get metrics for server %d: %v", serverID, err)
-		// Use system-level fallback metrics
-		if memStat, err := mem.VirtualMemory(); err == nil {
-			memoryUsage = memStat.UsedPercent
-		} else {
-			memoryUsage = 0.0
-		}
-		if cpuPercents, err := cpu.Percent(500*time.Millisecond, false); err == nil && len(cpuPercents) > 0 {
-			cpuUsage = cpuPercents[0]
-		} else {
-			cpuUsage = 0.0
-		}
-	}
-
-	// Validate metric ranges
-	if memoryUsage < 0 || memoryUsage > 100 {
-		log.Printf("⚠️ Invalid memory value %.2f for server %d, clamping to 0-100", memoryUsage, serverID)
-		memoryUsage = clamp(memoryUsage, 0, 100)
-	}
-	if cpuUsage < 0 || cpuUsage > 100 {
-		log.Printf("⚠️ Invalid CPU value %.2f for server %d, clamping to 0-100", cpuUsage, serverID)
-		cpuUsage = clamp(cpuUsage, 0, 100)
-	}
-
-	// Calculate success rate with fallback
-	successRate, err := calculateSuccessRate(serverID)
-	if err != nil {
-		log.Printf("⚠️ Failed to calculate success rate for server %d: %v", serverID, err)
-		successRate = 1.0 // Fallback to 100% success rate
-	}
-
-	// Database operations with individual error handling
+	// Store request IMMEDIATELY (critical for success rate accuracy)
 	if err := database.InsertRequest(serverID, success, duration); err != nil {
 		log.Printf("❌ Failed to log request (Server %d): %v", serverID, err)
 	}
 
+	// Update server load
 	if err := database.UpdateServerLoad(serverID, 1); err != nil {
 		log.Printf("❌ Failed to update load (Server %d): %v", serverID, err)
 	}
 
+	// Get server-specific metrics (avoid system fallback)
+	cpuUsage, memoryUsage, err := getActualServerMetrics(serverID)
+	if err != nil {
+		log.Printf("⚠️ Failed to get metrics for server %d: %v", serverID, err)
+		cpuUsage = 0.0 // Explicit default
+		memoryUsage = 0.0
+	}
+
+	// Clamp metrics BEFORE insertion
+	cpuUsage = clamp(cpuUsage, 0, 100)
+	memoryUsage = clamp(memoryUsage, 0, 100)
+
+	// Calculate success rate AFTER request is stored
+	successRate, err := calculateSuccessRate(serverID)
+	if err != nil {
+		log.Printf("⚠️ Failed to calculate success rate for server %d: %v", serverID, err)
+		successRate = 1.0 // Conservative fallback
+	}
+	successRate = clamp(successRate, 0, 1) // Ensure 0-1 range
+
+	// Insert metrics
 	if err := database.InsertMetrics(
 		serverID,
 		cpuUsage,
 		memoryUsage,
 		1,
-		clamp(successRate, 0, 1), // Ensure success rate stays between 0-1
+		successRate,
 	); err != nil {
 		log.Printf("❌ Failed to insert metrics (Server %d): %v", serverID, err)
 	}

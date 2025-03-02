@@ -152,3 +152,19 @@ func GetServerID(serverURL string) (int, error) {
 
 	return serverID, err
 }
+
+// GetServerWeight retrieves the weight of a server from database
+func GetServerWeight(serverID int) (int, error) {
+	var weight int
+	err := DB.QueryRow(`
+        SELECT weight FROM servers 
+        WHERE id = $1`,
+		serverID,
+	).Scan(&weight)
+
+	if err != nil {
+		log.Printf("⚠️ Error getting weight for server %d: %v", serverID, err)
+		return 1, err // Return default weight 1 if not found
+	}
+	return weight, nil
+}

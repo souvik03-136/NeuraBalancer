@@ -2,9 +2,7 @@ package loadbalancer
 
 import (
 	"bytes"
-	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -18,10 +16,12 @@ import (
 
 // Server struct to track health status
 type Server struct {
-	ID     int
-	URL    string
-	Alive  bool
-	Weight int // Added for Weighted Round Robin
+	ID          int
+	URL         string
+	Alive       bool
+	Weight      int
+	Connections int // Track active connections
+	mu          sync.Mutex
 }
 
 // LoadBalancer struct
@@ -39,7 +39,6 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 		metrics:  metrics.NewCollector(),
 	}
 
-	// Fetch server IDs from the database
 	for _, serverURL := range serverURLs {
 		serverID, err := database.GetServerID(serverURL)
 		if err != nil {
@@ -47,11 +46,18 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 			continue
 		}
 
+		// Fetch server's weight from database
+		weight, err := database.GetServerWeight(serverID)
+		if err != nil {
+			log.Printf("⚠️ Using default weight for server %s: %v", serverURL, err)
+			weight = 1 // Default weight
+		}
+
 		server := &Server{
-			ID:     serverID, // Use the actual database ID
+			ID:     serverID,
 			URL:    serverURL,
 			Alive:  true,
-			Weight: 1,
+			Weight: weight,
 		}
 		lb.servers = append(lb.servers, server)
 	}
@@ -61,25 +67,32 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 }
 
 // GetServer selects a healthy server based on the strategy
-func (lb *LoadBalancer) GetServer() (string, error) {
+func (lb *LoadBalancer) GetServer() (*Server, error) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 
 	// Filter healthy servers
-	var healthyServers []string
-	for _, server := range lb.servers {
-		if server.Alive {
-			healthyServers = append(healthyServers, server.URL)
+	var healthyServers []*Server
+	for _, s := range lb.servers {
+		if s.Alive {
+			healthyServers = append(healthyServers, s)
 		}
 	}
 
 	if len(healthyServers) == 0 {
-		log.Println("❌ No healthy servers available!")
-		return "", errors.New("no healthy servers available")
+		return nil, errors.New("no healthy servers available")
 	}
 
 	selected := lb.strategy.SelectServer(healthyServers)
-	log.Printf("🔀 Redirecting request to: %s\n", selected)
+	if selected == nil {
+		return nil, errors.New("strategy failed to select server")
+	}
+
+	// Increment connection count
+	selected.mu.Lock()
+	selected.Connections++
+	selected.mu.Unlock()
+
 	return selected, nil
 }
 
@@ -111,21 +124,19 @@ func (s *Server) checkServerHealth() bool {
 
 // startHealthChecks runs periodic health checks
 func (lb *LoadBalancer) startHealthChecks() {
-	// Perform an initial check
-	lb.mu.Lock()
-	for _, server := range lb.servers {
-		server.Alive = server.checkServerHealth()
-	}
-	lb.mu.Unlock()
-
-	// Start periodic checks
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
+	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
 		lb.mu.Lock()
-		for _, server := range lb.servers {
-			server.Alive = server.checkServerHealth()
+		for _, s := range lb.servers {
+			wasAlive := s.Alive
+			s.Alive = s.checkServerHealth()
+
+			// Reset connections if server was dead and now alive
+			if !wasAlive && s.Alive {
+				s.mu.Lock()
+				s.Connections = 0
+				s.mu.Unlock()
+			}
 		}
 		lb.mu.Unlock()
 	}
@@ -143,69 +154,61 @@ func (lb *LoadBalancer) GetAllServers() []*Server {
 
 // ForwardRequest sends the request to ALL healthy backend servers (broadcast)
 func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var responses []string
+	startTime := time.Now()
+	var serverID int
+	var success bool
 
-	// Get healthy servers with proper locking
-	lb.mu.Lock()
-	healthyServers := make([]*Server, 0, len(lb.servers))
-	for _, server := range lb.servers {
-		if server.Alive {
-			healthyServers = append(healthyServers, server)
-		}
-	}
-	lb.mu.Unlock()
+	defer func() {
+		duration := time.Since(startTime)
+		lb.metrics.RecordRequest(serverID, success, duration)
+	}()
 
-	if len(healthyServers) == 0 {
-		log.Println("❌ No healthy servers available!")
-		http.Error(w, "No healthy servers available", http.StatusServiceUnavailable)
+	// Select server
+	server, err := lb.GetServer()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		success = false
 		return
 	}
+	serverID = server.ID
 
-	// Clone request body and headers
+	// Decrement connection count when done
+	defer func() {
+		server.mu.Lock()
+		server.Connections--
+		server.mu.Unlock()
+	}()
+
+	// Clone request
 	bodyBytes, _ := io.ReadAll(r.Body)
 	defer r.Body.Close()
 
-	wg.Add(len(healthyServers))
-
-	for _, server := range healthyServers {
-		go func(s *Server) {
-			defer wg.Done()
-
-			// Create new request with proper context
-			ctx := context.WithValue(r.Context(), "lb_server_id", s.ID)
-			req, _ := http.NewRequestWithContext(ctx, r.Method, s.URL+r.URL.Path, bytes.NewReader(bodyBytes))
-			req.Header = r.Header.Clone()
-
-			startTime := time.Now()
-			resp, err := http.DefaultClient.Do(req)
-			responseTime := time.Since(startTime)
-
-			if err != nil {
-				log.Printf("❌ Failed to forward to %s: %v", s.URL, err)
-				lb.metrics.RecordRequest(s.ID, false, responseTime)
-				return
-			}
-			defer resp.Body.Close()
-
-			body, _ := io.ReadAll(resp.Body)
-
-			mu.Lock()
-			responses = append(responses, fmt.Sprintf("✅ %s: %s", s.URL, string(body)))
-			mu.Unlock()
-
-			lb.metrics.RecordRequest(s.ID, true, responseTime)
-			log.Printf("✅ Successfully forwarded to %s", s.URL)
-		}(server)
+	// Create new request
+	req, err := http.NewRequest(r.Method, server.URL+r.URL.Path, bytes.NewReader(bodyBytes))
+	if err != nil {
+		http.Error(w, "Error creating request", http.StatusInternalServerError)
+		success = false
+		return
 	}
+	req.Header = r.Header.Clone()
 
-	wg.Wait()
+	// Forward request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// Mark server as down immediately
+		server.mu.Lock()
+		server.Alive = false
+		server.mu.Unlock()
+		success = false
+		http.Error(w, "Server unavailable", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(fmt.Sprintf("Broadcast complete to %d servers:\n%s",
-		len(healthyServers),
-		strings.Join(responses, "\n"))))
+	// Copy response
+	success = resp.StatusCode < 500
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // SelectBackend dynamically chooses the best backend server.
