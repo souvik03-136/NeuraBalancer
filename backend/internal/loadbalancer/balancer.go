@@ -42,23 +42,28 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 	for _, serverURL := range serverURLs {
 		serverID, err := database.GetServerID(serverURL)
 		if err != nil {
-			log.Printf("⚠️ Failed to get ID for server %s: %v", serverURL, err)
-			continue
+			log.Printf("⚠️ Using temporary ID for %s: %v", serverURL, err)
+			serverID = -len(lb.servers) // Generate unique negative ID
 		}
 
-		// Fetch server's weight from database
-		weight, err := database.GetServerWeight(serverID)
-		if err != nil {
-			log.Printf("⚠️ Using default weight for server %s: %v", serverURL, err)
-			weight = 1 // Default weight
+		weight := 1 // Default weight
+		if serverID > 0 {
+			weight, err = database.GetServerWeight(serverID)
+			if err != nil {
+				log.Printf("⚠️ Using default weight for %s: %v", serverURL, err)
+			}
 		}
-
 		server := &Server{
 			ID:     serverID,
 			URL:    serverURL,
-			Alive:  true,
 			Weight: weight,
 		}
+		isActive, err := database.GetServerActiveStatus(serverID)
+		if err != nil {
+			log.Printf("⚠️ Failed to get initial status for %s: %v", serverURL, err)
+			isActive = true // Default to active
+		}
+		server.Alive = isActive
 		lb.servers = append(lb.servers, server)
 	}
 
@@ -97,8 +102,10 @@ func (lb *LoadBalancer) GetServer() (*Server, error) {
 }
 
 // checkServerHealth pings the server's /health endpoint
+const healthCheckRetries = 3
+
 func (s *Server) checkServerHealth() bool {
-	client := http.Client{Timeout: 5 * time.Second}
+	client := http.Client{Timeout: 3 * time.Second}
 
 	// Ensure URL has scheme
 	healthURL := s.URL + "/health"
@@ -106,33 +113,52 @@ func (s *Server) checkServerHealth() bool {
 		healthURL = "http://" + healthURL
 	}
 
-	resp, err := client.Get(healthURL)
-	if err != nil {
-		log.Printf("❌ Server %s is DOWN: %v\n", s.URL, err)
-		return false
-	}
-	defer resp.Body.Close()
+	for i := 0; i < healthCheckRetries; i++ {
+		resp, err := client.Get(healthURL)
+		if err == nil {
+			defer resp.Body.Close()
 
-	healthy := resp.StatusCode == http.StatusOK
-	if healthy {
-		log.Printf("✅ Server %s is UP\n", s.URL)
-	} else {
-		log.Printf("⚠️  Server %s returned %d (unhealthy)\n", s.URL, resp.StatusCode)
+			if resp.StatusCode == http.StatusOK {
+				log.Printf("✅ Server %s is UP\n", s.URL)
+				return true
+			}
+			log.Printf("⚠️  Server %s returned %d (unhealthy)\n", s.URL, resp.StatusCode)
+		} else {
+			log.Printf("❌ Server %s is DOWN: %v\n", s.URL, err)
+		}
+
+		// Retry after a short delay
+		if i < healthCheckRetries-1 {
+			time.Sleep(1 * time.Second)
+		}
 	}
-	return healthy
+
+	return false
 }
 
 // startHealthChecks runs periodic health checks
 func (lb *LoadBalancer) startHealthChecks() {
 	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for range ticker.C {
 		lb.mu.Lock()
 		for _, s := range lb.servers {
 			wasAlive := s.Alive
-			s.Alive = s.checkServerHealth()
+			isAlive := s.checkServerHealth()
 
-			// Reset connections if server was dead and now alive
-			if !wasAlive && s.Alive {
+			// Only update DB when status changes
+			if wasAlive != isAlive {
+				err := database.UpdateServerStatus(s.ID, isAlive)
+				if err != nil {
+					log.Printf("❌ Failed to update server status (ID %d): %v", s.ID, err)
+				} else {
+					log.Printf("📡 Updated server %s status in DB: Alive=%v", s.URL, isAlive)
+				}
+			}
+
+			s.Alive = isAlive
+			if !wasAlive && isAlive {
 				s.mu.Lock()
 				s.Connections = 0
 				s.mu.Unlock()
@@ -159,7 +185,7 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 	var success bool
 
 	defer func() {
-		duration := time.Since(startTime)
+		duration := time.Duration(time.Since(startTime).Milliseconds()) * time.Millisecond
 		lb.metrics.RecordRequest(serverID, success, duration)
 	}()
 
@@ -199,6 +225,14 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 		server.mu.Lock()
 		server.Alive = false
 		server.mu.Unlock()
+
+		// Async DB update
+		go func() {
+			if err := database.UpdateServerStatus(server.ID, false); err != nil {
+				log.Printf("❌ Failed to update status for %s: %v", server.URL, err)
+			}
+		}()
+
 		success = false
 		http.Error(w, "Server unavailable", http.StatusBadGateway)
 		return

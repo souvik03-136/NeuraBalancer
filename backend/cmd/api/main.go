@@ -163,8 +163,14 @@ func isServerUp(server string) bool {
 // fallbackServerList provides a fallback if DB queries fail
 func fallbackServerList(serverList []string) []string {
 	servers, err := database.GetAvailableServers()
-	if err != nil || len(servers) == 0 {
-		log.Println("⚠️ No servers in DB, falling back to in-memory list.")
+	if err != nil {
+		log.Printf("⚠️ DB error, using in-memory list: %v", err)
+		return serverList
+	}
+
+	// Directly use the server strings from DB
+	if len(servers) == 0 {
+		log.Println("⚠️ No active servers in DB, falling back to original list")
 		return serverList
 	}
 	return servers

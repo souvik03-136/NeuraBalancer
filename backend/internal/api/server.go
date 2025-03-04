@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,7 +18,12 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 )
 
-// StartBackendServer runs a simple backend server with graceful shutdown support
+type ServerMetrics struct {
+	CPU    float64
+	Memory float64
+	mu     sync.RWMutex
+}
+
 func StartBackendServer(serverAddr string) {
 	parsed, err := url.Parse(serverAddr)
 	if err != nil {
@@ -25,48 +32,36 @@ func StartBackendServer(serverAddr string) {
 
 	port := parsed.Port()
 	if port == "" {
-		port = "80" // Default to port 80 if no port is specified
+		port = "80"
 	}
+
+	// Initialize metrics
+	metrics := &ServerMetrics{}
+	go updateMetrics(metrics)
 
 	// Create the mux router
 	mux := http.NewServeMux()
 
-	// Add metrics endpoint
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		// Get real-time memory stats
-		memStat, err := mem.VirtualMemory()
-		if err != nil {
-			log.Printf("❌ Memory stats error: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		// Get CPU usage with proper sampling
-		cpuPercents, err := cpu.Percent(500*time.Millisecond, false)
-		if err != nil || len(cpuPercents) == 0 {
-			log.Printf("⚠️ CPU measurement failed: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
+		metrics.mu.RLock()
+		defer metrics.mu.RUnlock()
 
 		json.NewEncoder(w).Encode(map[string]float64{
-			"cpu_usage":    cpuPercents[0],
-			"memory_usage": memStat.UsedPercent, // Actual usage percentage
+			"cpu_usage":    math.Round(metrics.CPU*10) / 10,
+			"memory_usage": math.Round(metrics.Memory*10) / 10,
 		})
 	})
 
-	// Add health check endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "OK")
 	})
 
-	// Add root endpoint
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "Hello from server on port %s", port)
 	})
 
-	// Create HTTP server with timeouts
+	// Start server
 	server := &http.Server{
 		Addr:         ":" + port,
 		Handler:      mux,
@@ -75,11 +70,9 @@ func StartBackendServer(serverAddr string) {
 		IdleTimeout:  15 * time.Second,
 	}
 
-	// Channel to listen for shutdown signals
 	shutdownChan := make(chan os.Signal, 1)
 	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
 
-	// Start server in a goroutine
 	go func() {
 		log.Printf("🚀 Backend server starting on port %s...\n", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -87,18 +80,44 @@ func StartBackendServer(serverAddr string) {
 		}
 	}()
 
-	// Block until shutdown signal is received
 	<-shutdownChan
 	log.Printf("🛑 Shutting down server on port %s...\n", port)
 
-	// Create shutdown context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Attempt graceful shutdown
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("⚠️ Server on port %s forced to shutdown: %v", port, err)
 	}
 
 	log.Printf("✅ Server on port %s exited cleanly\n", port)
+}
+
+func updateMetrics(metrics *ServerMetrics) {
+	var smoothedCPU, smoothedMemory float64
+
+	for {
+		cpuPercents, err := cpu.Percent(2*time.Second, false)
+		memStat, err := mem.VirtualMemory()
+
+		if err == nil && len(cpuPercents) > 0 {
+			currentCPU := cpuPercents[0]
+			currentMemory := memStat.UsedPercent
+
+			if smoothedCPU == 0 {
+				smoothedCPU = currentCPU
+				smoothedMemory = currentMemory
+			} else {
+				smoothedCPU = 0.7*smoothedCPU + 0.3*currentCPU
+				smoothedMemory = 0.7*smoothedMemory + 0.3*currentMemory
+			}
+
+			metrics.mu.Lock()
+			metrics.CPU = math.Max(0, math.Min(100, smoothedCPU))
+			metrics.Memory = math.Max(0, math.Min(100, smoothedMemory))
+			metrics.mu.Unlock()
+		}
+
+		time.Sleep(2 * time.Second)
+	}
 }

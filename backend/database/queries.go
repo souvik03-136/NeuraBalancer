@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"log"
 	"net/url"
 	"strconv"
@@ -45,16 +46,26 @@ func InsertMetrics(serverID int, cpu float64, mem float64, count int, successRat
 
 // UpdateServerStatus updates the is_active status of a server.
 func UpdateServerStatus(serverID int, isActive bool) error {
-	_, err := DB.Exec(`
-		UPDATE servers
-		SET is_active = $1
+	const maxRetries = 3
+	var err error
+
+	for i := 0; i < maxRetries; i++ {
+		_, err = DB.Exec(`
+		UPDATE servers 
+		SET is_active = $1,
+			last_checked = NOW() 
 		WHERE id = $2`,
-		isActive, serverID,
-	)
-	if err != nil {
-		log.Printf("❌ Failed to update server status for server ID %d: %v", serverID, err)
+			isActive, serverID,
+		)
+
+		if err == nil {
+			return nil
+		}
+
+		log.Printf("⚠️ DB update attempt %d/%d failed: %v", i+1, maxRetries, err)
+		time.Sleep(1 * time.Second)
 	}
-	return err
+	return fmt.Errorf("failed to update server status after %d attempts: %v", maxRetries, err)
 }
 
 // UpdateServerLoad updates the load of a specific server.
@@ -67,6 +78,7 @@ func UpdateServerLoad(serverID int, load int) error {
 	)
 	return err
 }
+
 func GetAvailableServers() ([]string, error) {
 	rows, err := DB.Query(`SELECT name FROM servers WHERE is_active = TRUE`)
 	if err != nil {
@@ -167,4 +179,13 @@ func GetServerWeight(serverID int) (int, error) {
 		return 1, err // Return default weight 1 if not found
 	}
 	return weight, nil
+}
+
+func GetServerActiveStatus(serverID int) (bool, error) {
+	var isActive bool
+	err := DB.QueryRow(
+		"SELECT is_active FROM servers WHERE id = $1",
+		serverID,
+	).Scan(&isActive)
+	return isActive, err
 }
