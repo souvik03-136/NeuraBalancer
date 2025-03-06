@@ -22,15 +22,14 @@ func CORSMiddleware() echo.MiddlewareFunc {
 // RequestLogger logs each incoming request
 func RequestLogger() echo.MiddlewareFunc {
 	return middleware.LoggerWithConfig(middleware.LoggerConfig{
-		Format: "🕒 ${time_rfc3339} ➡️ [${method}] ${uri} - ${remote_ip}\n⬅️  [${status}] ${uri}\n",
+		Format: "${time_rfc3339} [${method}] ${uri} - ${remote_ip}\n[${status}] ${uri}\n",
 	})
 }
 
-// ✅ Improved MetricsMiddleware for safer handling of `serverID`
+// MetricsMiddleware records request metrics
 func MetricsMiddleware(collector *metrics.Collector) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Skip system endpoints
 			if c.Path() == "/health" || c.Path() == "/metrics" {
 				return next(c)
 			}
@@ -39,7 +38,6 @@ func MetricsMiddleware(collector *metrics.Collector) echo.MiddlewareFunc {
 			err := next(c)
 			duration := time.Since(start)
 
-			// Get server ID from load balancer context
 			if serverID, ok := c.Request().Context().Value("lb_server_id").(int); ok && serverID > 0 {
 				status := c.Response().Status
 				success := status >= 200 && status < 400

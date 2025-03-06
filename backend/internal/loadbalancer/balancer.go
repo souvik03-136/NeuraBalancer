@@ -42,7 +42,7 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 	for _, serverURL := range serverURLs {
 		serverID, err := database.GetServerID(serverURL)
 		if err != nil {
-			log.Printf("⚠️ Using temporary ID for %s: %v", serverURL, err)
+			log.Printf("Using temporary ID for %s: %v", serverURL, err)
 			serverID = -len(lb.servers) // Generate unique negative ID
 		}
 
@@ -50,7 +50,7 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 		if serverID > 0 {
 			weight, err = database.GetServerWeight(serverID)
 			if err != nil {
-				log.Printf("⚠️ Using default weight for %s: %v", serverURL, err)
+				log.Printf("Using default weight for %s: %v", serverURL, err)
 			}
 		}
 		server := &Server{
@@ -60,7 +60,7 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 		}
 		isActive, err := database.GetServerActiveStatus(serverID)
 		if err != nil {
-			log.Printf("⚠️ Failed to get initial status for %s: %v", serverURL, err)
+			log.Printf("Failed to get initial status for %s: %v", serverURL, err)
 			isActive = true // Default to active
 		}
 		server.Alive = isActive
@@ -119,12 +119,12 @@ func (s *Server) checkServerHealth() bool {
 			defer resp.Body.Close()
 
 			if resp.StatusCode == http.StatusOK {
-				log.Printf("✅ Server %s is UP\n", s.URL)
+				log.Printf("Server %s is UP\n", s.URL)
 				return true
 			}
-			log.Printf("⚠️  Server %s returned %d (unhealthy)\n", s.URL, resp.StatusCode)
+			log.Printf("Server %s returned %d (unhealthy)\n", s.URL, resp.StatusCode)
 		} else {
-			log.Printf("❌ Server %s is DOWN: %v\n", s.URL, err)
+			log.Printf("Server %s is DOWN: %v\n", s.URL, err)
 		}
 
 		// Retry after a short delay
@@ -151,9 +151,9 @@ func (lb *LoadBalancer) startHealthChecks() {
 			if wasAlive != isAlive {
 				err := database.UpdateServerStatus(s.ID, isAlive)
 				if err != nil {
-					log.Printf("❌ Failed to update server status (ID %d): %v", s.ID, err)
+					log.Printf("Failed to update server status (ID %d): %v", s.ID, err)
 				} else {
-					log.Printf("📡 Updated server %s status in DB: Alive=%v", s.URL, isAlive)
+					log.Printf("Updated server %s status in DB: Alive=%v", s.URL, isAlive)
 				}
 			}
 
@@ -229,7 +229,7 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 		// Async DB update
 		go func() {
 			if err := database.UpdateServerStatus(server.ID, false); err != nil {
-				log.Printf("❌ Failed to update status for %s: %v", server.URL, err)
+				log.Printf("Failed to update status for %s: %v", server.URL, err)
 			}
 		}()
 
@@ -249,9 +249,9 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 func SelectBackend() string {
 	serverIP, err := database.GetLeastLoadedServer()
 	if err != nil {
-		log.Println("⚠️ Error fetching backend server:", err)
+		log.Println("Error fetching backend server:", err)
 		return "" // Fallback strategy (e.g., round robin)
 	}
-	log.Println("🔀 Routing request to:", serverIP)
+	log.Println("Routing request to:", serverIP)
 	return serverIP
 }

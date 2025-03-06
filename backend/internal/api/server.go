@@ -27,7 +27,7 @@ type ServerMetrics struct {
 func StartBackendServer(serverAddr string) {
 	parsed, err := url.Parse(serverAddr)
 	if err != nil {
-		log.Fatalf("❌ Invalid server URL: %s, error: %v", serverAddr, err)
+		log.Fatalf("Invalid server URL: %s, error: %v", serverAddr, err)
 	}
 
 	port := parsed.Port()
@@ -74,23 +74,23 @@ func StartBackendServer(serverAddr string) {
 	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("🚀 Backend server starting on port %s...\n", port)
+		log.Printf("Backend server starting on port %s...\n", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("❌ Backend server failed on port %s: %v", port, err)
+			log.Fatalf("Backend server failed on port %s: %v", port, err)
 		}
 	}()
 
 	<-shutdownChan
-	log.Printf("🛑 Shutting down server on port %s...\n", port)
+	log.Printf("Shutting down server on port %s...\n", port)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("⚠️ Server on port %s forced to shutdown: %v", port, err)
+		log.Printf("Server on port %s forced to shutdown: %v", port, err)
 	}
 
-	log.Printf("✅ Server on port %s exited cleanly\n", port)
+	log.Printf("Server on port %s exited cleanly\n", port)
 }
 
 func updateMetrics(metrics *ServerMetrics) {

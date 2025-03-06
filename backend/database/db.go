@@ -16,7 +16,7 @@ var DB *sql.DB
 // LoadEnv loads environment variables from .env
 func LoadEnv() {
 	if err := godotenv.Load(); err != nil {
-		log.Println("⚠️  Could not load .env file, using system environment variables")
+		log.Println("Could not load .env file, using system environment variables")
 	}
 }
 
@@ -38,20 +38,20 @@ func InitDB() error {
 		dbHost, dbPort, dbUser, dbPassword, dbName, dbSSLMode,
 	)
 
-	log.Println("🔄 Connecting to database...")
+	log.Println("Connecting to database...")
 
 	var err error
 	DB, err = sql.Open("postgres", dsn)
 	if err != nil {
-		return fmt.Errorf("❌ Failed to connect to DB: %w", err)
+		return fmt.Errorf("Failed to connect to DB: %w", err)
 	}
 
 	// Verify connection
 	if err := DB.Ping(); err != nil {
-		return fmt.Errorf("❌ Database ping failed: %w", err)
+		return fmt.Errorf("Database ping failed: %w", err)
 	}
 
-	log.Println("✅ Database connected successfully")
+	log.Println("Database connected successfully")
 	return nil
 }
 
@@ -59,7 +59,7 @@ func InitDB() error {
 func CloseDB() {
 	if DB != nil {
 		DB.Close()
-		log.Println("🔌 Database connection closed")
+		log.Println("Database connection closed")
 	}
 }
 

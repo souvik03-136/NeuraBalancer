@@ -77,35 +77,35 @@ func (c *Collector) RecordRequest(serverID int, success bool, duration time.Dura
 
 	// Validate serverID before proceeding
 	if serverID <= 0 {
-		log.Printf("⚠️ Invalid server ID: %d. Skipping metrics insertion.", serverID)
+		log.Printf(" Invalid server ID: %d. Skipping metrics insertion.", serverID)
 		return
 	}
 
 	// Verify server existence
 	exists, err := database.ServerExists(serverID)
 	if err != nil {
-		log.Printf("❌ Error checking server existence (ID %d): %v", serverID, err)
+		log.Printf(" Error checking server existence (ID %d): %v", serverID, err)
 		return
 	}
 	if !exists {
-		log.Printf("⚠️ Server ID %d not found in database. Skipping metrics.", serverID)
+		log.Printf(" Server ID %d not found in database. Skipping metrics.", serverID)
 		return
 	}
 
 	// Store request IMMEDIATELY (critical for success rate accuracy)
 	if err := database.InsertRequest(serverID, success, duration); err != nil {
-		log.Printf("❌ Failed to log request (Server %d): %v", serverID, err)
+		log.Printf(" Failed to log request (Server %d): %v", serverID, err)
 	}
 
 	// Update server load
 	if err := database.UpdateServerLoad(serverID, 1); err != nil {
-		log.Printf("❌ Failed to update load (Server %d): %v", serverID, err)
+		log.Printf(" Failed to update load (Server %d): %v", serverID, err)
 	}
 
 	// Get server-specific metrics (avoid system fallback)
 	cpuUsage, memoryUsage, err := getActualServerMetrics(serverID)
 	if err != nil {
-		log.Printf("⚠️ Failed to get metrics for server %d: %v", serverID, err)
+		log.Printf(" Failed to get metrics for server %d: %v", serverID, err)
 		cpuUsage = 0.0 // Explicit default
 		memoryUsage = 0.0
 	}
@@ -117,7 +117,7 @@ func (c *Collector) RecordRequest(serverID int, success bool, duration time.Dura
 	// Calculate success rate AFTER request is stored
 	successRate, err := calculateSuccessRate(serverID)
 	if err != nil {
-		log.Printf("⚠️ Failed to calculate success rate for server %d: %v", serverID, err)
+		log.Printf(" Failed to calculate success rate for server %d: %v", serverID, err)
 		successRate = 1.0 // Conservative fallback
 	}
 	successRate = clamp(successRate, 0, 1) // Ensure 0-1 range
@@ -130,7 +130,7 @@ func (c *Collector) RecordRequest(serverID int, success bool, duration time.Dura
 		1,
 		successRate,
 	); err != nil {
-		log.Printf("❌ Failed to insert metrics (Server %d): %v", serverID, err)
+		log.Printf(" Failed to insert metrics (Server %d): %v", serverID, err)
 	}
 }
 

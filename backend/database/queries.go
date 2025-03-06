@@ -37,10 +37,10 @@ func InsertMetrics(serverID int, cpu float64, mem float64, count int, successRat
 		serverID, cpu, mem, count, successRate,
 	)
 	if err != nil {
-		log.Printf("❌ Failed to insert metrics for server ID %d: %v", serverID, err)
+		log.Printf(" Failed to insert metrics for server ID %d: %v", serverID, err)
 		return err
 	}
-	log.Printf("✅ Metrics inserted successfully for server ID %d", serverID)
+	log.Printf(" Metrics inserted successfully for server ID %d", serverID)
 	return nil
 }
 
@@ -62,7 +62,7 @@ func UpdateServerStatus(serverID int, isActive bool) error {
 			return nil
 		}
 
-		log.Printf("⚠️ DB update attempt %d/%d failed: %v", i+1, maxRetries, err)
+		log.Printf(" DB update attempt %d/%d failed: %v", i+1, maxRetries, err)
 		time.Sleep(1 * time.Second)
 	}
 	return fmt.Errorf("failed to update server status after %d attempts: %v", maxRetries, err)
@@ -102,7 +102,7 @@ func RegisterServer(server string) error {
 	// Parse the server URL
 	parsed, err := url.Parse(server)
 	if err != nil {
-		log.Printf("❌ Invalid server URL: %s, error: %v", server, err)
+		log.Printf(" Invalid server URL: %s, error: %v", server, err)
 		return err
 	}
 
@@ -116,7 +116,7 @@ func RegisterServer(server string) error {
 	// Convert port to integer
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
-		log.Printf("❌ Invalid port number: %s", portStr)
+		log.Printf(" Invalid port number: %s", portStr)
 		return err
 	}
 
@@ -130,11 +130,11 @@ func RegisterServer(server string) error {
 	// Execute the query with the correct parameters
 	_, err = DB.Exec(query, server, ipAddress, port, "active", true)
 	if err != nil {
-		log.Printf("❌ Failed to register/update server in DB: %v", err)
+		log.Printf(" Failed to register/update server in DB: %v", err)
 		return err
 	}
 
-	log.Printf("✅ Server %s registered/updated successfully", server)
+	log.Printf(" Server %s registered/updated successfully", server)
 	return nil
 }
 
@@ -175,7 +175,7 @@ func GetServerWeight(serverID int) (int, error) {
 	).Scan(&weight)
 
 	if err != nil {
-		log.Printf("⚠️ Error getting weight for server %d: %v", serverID, err)
+		log.Printf(" Error getting weight for server %d: %v", serverID, err)
 		return 1, err // Return default weight 1 if not found
 	}
 	return weight, nil

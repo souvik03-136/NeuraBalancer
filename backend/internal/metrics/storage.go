@@ -28,13 +28,13 @@ func InsertMetric(serverID int, cpuUsage, memoryUsage float64, requestCount int,
 	var isActive bool
 	err := DB.QueryRow(`SELECT is_active FROM servers WHERE id = $1`, serverID).Scan(&isActive)
 	if err != nil {
-		log.Printf("❌ Error checking server status: %v", err)
+		log.Printf(" Error checking server status: %v", err)
 		return fmt.Errorf("error checking server status: %w", err)
 	}
 
 	// If the server is not active, skip inserting the metric
 	if !isActive {
-		log.Printf("❌ Server %d is not active. Skipping metrics insertion.", serverID)
+		log.Printf(" Server %d is not active. Skipping metrics insertion.", serverID)
 		return nil
 	}
 
@@ -46,11 +46,11 @@ func InsertMetric(serverID int, cpuUsage, memoryUsage float64, requestCount int,
 	          VALUES ($1, $2, $3, $4, $5, $6)`
 	_, err = DB.Exec(query, serverID, cpuUsage, memoryUsage, requestCount, successRate, timestamp)
 	if err != nil {
-		log.Printf("❌ Failed to insert metric: %v", err)
+		log.Printf(" Failed to insert metric: %v", err)
 		return fmt.Errorf("failed to insert metric: %w", err)
 	}
 
-	log.Printf("✅ Metric inserted successfully for server %d", serverID)
+	log.Printf(" Metric inserted successfully for server %d", serverID)
 	return nil
 }
 
@@ -65,7 +65,7 @@ func GetMetrics(serverID int, startTime, endTime time.Time) ([]Metric, error) {
 	          FROM metrics WHERE server_id = $1 AND timestamp BETWEEN $2 AND $3 ORDER BY timestamp DESC`
 	rows, err := DB.Query(query, serverID, startTime, endTime)
 	if err != nil {
-		log.Printf("❌ Failed to retrieve metrics: %v", err)
+		log.Printf(" Failed to retrieve metrics: %v", err)
 		return nil, fmt.Errorf("failed to retrieve metrics: %w", err)
 	}
 	defer rows.Close() // Ensure rows are closed when done
@@ -90,10 +90,10 @@ func GetLatestMetric(serverID int) (*Metric, error) {
 	var m Metric
 	if err := row.Scan(&m.ID, &m.ServerID, &m.CPUUsage, &m.MemoryUsage, &m.RequestCount, &m.SuccessRate, &m.Timestamp); err != nil {
 		if err == sql.ErrNoRows {
-			log.Printf("⚠️ No metrics found for server ID: %d", serverID)
+			log.Printf(" No metrics found for server ID: %d", serverID)
 			return nil, nil
 		}
-		log.Printf("❌ Error retrieving latest metric: %v", err)
+		log.Printf(" Error retrieving latest metric: %v", err)
 		return nil, fmt.Errorf("error retrieving latest metric: %w", err)
 	}
 	return &m, nil

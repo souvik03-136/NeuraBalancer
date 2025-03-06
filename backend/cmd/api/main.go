@@ -24,7 +24,7 @@ import (
 func main() {
 	// Initialize Database
 	if err := database.InitDB(); err != nil {
-		log.Fatalf("❌ Database initialization failed: %v", err)
+		log.Fatalf("Database initialization failed: %v", err)
 	}
 	defer database.CloseDB()
 
@@ -36,7 +36,7 @@ func main() {
 	var serverList []string
 
 	if serverListEnv == "" {
-		log.Println("⚠️  No SERVERS environment variable found. Using default servers.")
+		log.Println("No SERVERS environment variable found. Using default servers.")
 		serverList = []string{"http://localhost:5000", "http://localhost:5001", "http://localhost:5002"}
 	} else {
 		serverList = strings.Split(serverListEnv, ",")
@@ -46,23 +46,23 @@ func main() {
 	for _, server := range serverList {
 		err := database.RegisterServer(server) // Auto-register in DB
 		if err != nil {
-			log.Printf("⚠️ Failed to register server %s in DB: %v", server, err)
+			log.Printf("Failed to register server %s in DB: %v", server, err)
 		} else {
-			log.Printf("✅ Server %s registered in DB", server)
+			log.Printf("Server %s registered in DB", server)
 		}
 	}
 
 	// Wait a bit for servers to start
 	time.Sleep(2 * time.Second)
 
-	log.Println("🔗 Available Servers:", serverList)
+	log.Println("Available Servers:", serverList)
 
 	// Check if servers are reachable
 	for _, server := range serverList {
 		if isServerUp(server) {
-			log.Printf("✅ Server %s is UP!", server)
+			log.Printf("Server %s is UP!", server)
 		} else {
-			log.Printf("❌ Server %s is DOWN!", server)
+			log.Printf("Server %s is DOWN!", server)
 		}
 	}
 
@@ -87,13 +87,12 @@ func main() {
 	case "round_robin":
 		strategy = roundRobin
 	default: // Default to Least Connections
-		log.Println("⚠️  No valid strategy found. Defaulting to Least Connections.")
+		log.Println("No valid strategy found. Defaulting to Least Connections.")
 		strategyEnv = "least_connections"
 		strategy = leastConnections
-
 	}
 
-	log.Println("🔄 Load Balancing Strategy:", strategyEnv)
+	log.Println("Load Balancing Strategy:", strategyEnv)
 
 	// Initialize Echo framework
 	e := echo.New()
@@ -121,9 +120,9 @@ func main() {
 
 	// Start Load Balancer in a goroutine
 	go func() {
-		log.Println("🚀 Starting Load Balancer on port", port)
+		log.Println("Starting Load Balancer on port", port)
 		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("❌ Error starting server: %v", err)
+			log.Fatalf("Error starting server: %v", err)
 		}
 	}()
 
@@ -131,17 +130,17 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
-	log.Println("🛑 Shutting down server gracefully...")
+	log.Println("Shutting down server gracefully...")
 
 	// Context for graceful shutdown (timeout: 10 seconds)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := e.Shutdown(ctx); err != nil {
-		log.Fatalf("❌ Server forced to shutdown: %v", err)
+		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	log.Println("✅ Server exited cleanly")
+	log.Println("Server exited cleanly")
 }
 
 // isServerUp checks if a server is reachable with retries
@@ -154,7 +153,7 @@ func isServerUp(server string) bool {
 		if err == nil && resp.StatusCode == http.StatusOK {
 			return true
 		}
-		log.Printf("🔍 Retrying connection to %s (attempt %d/%d)", server, i+1, maxRetries)
+		log.Printf("Retrying connection to %s (attempt %d/%d)", server, i+1, maxRetries)
 		time.Sleep(2 * time.Second)
 	}
 	return false
@@ -164,13 +163,13 @@ func isServerUp(server string) bool {
 func fallbackServerList(serverList []string) []string {
 	servers, err := database.GetAvailableServers()
 	if err != nil {
-		log.Printf("⚠️ DB error, using in-memory list: %v", err)
+		log.Printf("DB error, using in-memory list: %v", err)
 		return serverList
 	}
 
 	// Directly use the server strings from DB
 	if len(servers) == 0 {
-		log.Println("⚠️ No active servers in DB, falling back to original list")
+		log.Println("No active servers in DB, falling back to original list")
 		return serverList
 	}
 	return servers
