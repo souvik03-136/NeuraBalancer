@@ -1,11 +1,17 @@
 #!/bin/sh
-commit_message=$(cat "$1" | sed -e 's/^[[:space:]]*//')
-matched_str=$(echo "$commit_message" | grep -E "^Merge.+|(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|types)(\(.+\))?!?: [a-zA-Z0-9 ]+$")
-echo "$matched_str"
-if [ "$matched_str" != "" ];
-then
-	exit 0
+
+# Read the commit message and trim leading/trailing whitespace
+commit_message=$(cat "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+# Check if the commit message matches Conventional Commits format
+if echo "$commit_message" | grep -qE "^Merge.+|(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|types)(\(.+\))?!?: [a-zA-Z0-9 ]+$"; then
+    exit 0
 else
-	echo "Commit rejected due to incorrect commit message format. See commit standards here - https://www.conventionalcommits.org/en/v1.0.0/"
-	exit 1
+    # Print error message and reject the commit
+    echo "ERROR: Commit rejected due to incorrect commit message format."
+    echo "Your message: $commit_message"
+    echo "Expected format: <type>(<scope>): <description>"
+    echo "Example: feat(api): add new endpoint"
+    echo "See commit standards here: https://www.conventionalcommits.org/en/v1.0.0/"
+    exit 1
 fi

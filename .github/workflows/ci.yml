@@ -1,0 +1,56 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:latest
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: 1.21
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Run Go tests
+      working-directory: ./backend
+      run: go test -v -race ./...
+    
+    - name: Run Python tests
+      working-directory: ./ml
+      run: |
+        pip install -r requirements-test.txt
+        pytest
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Go lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        working-directory: ./backend
+    
+    - name: Run Python lint
+      working-directory: ./ml
+      run: |
+        pip install black flake8
+        black --check .
+        flake8 .

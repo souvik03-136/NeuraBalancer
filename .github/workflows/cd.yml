@@ -1,0 +1,29 @@
+name: CD Pipeline
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+    
+    - name: Package Helm charts
+      working-directory: ./deployments/helm
+      run: |
+        helm dependency update
+        helm package .
+    
+    - name: Deploy to Kubernetes
+      uses: argoproj/argo-cd-github-actions@main
+      with:
+        argocd-server: ${{ secrets.ARGOCD_SERVER }}
+        argocd-token: ${{ secrets.ARGOCD_TOKEN }}
+        command: app create --file deployments/helm/values-production.yaml
