@@ -1,17 +1,20 @@
-FROM python:3.10-slim
+FROM golang:1.21 as builder
 
 WORKDIR /app
-COPY requirements.txt .
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc python3-dev && \
-    pip install --no-cache-dir -r requirements.txt && \
-    apt-get purge -y --auto-remove gcc python3-dev
-
 COPY . .
+RUN go mod download
+RUN CGO_ENABLED=1 GOOS=linux go build -o model-server .
 
-# Install ONNX Runtime
-RUN pip install onnxruntime
+FROM ubuntu:22.04
 
-EXPOSE 5000
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "app:app"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/model-server /app/model-server
+COPY ml/models /app/models
+COPY --from=builder /app/onnxruntime.so /usr/lib/
+
+ENV LD_LIBRARY_PATH=/usr/lib
+CMD ["/app/model-server"]

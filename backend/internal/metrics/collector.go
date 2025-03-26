@@ -19,6 +19,11 @@ type Collector struct {
 	successfulRequests prometheus.Counter
 	failedRequests     prometheus.Counter
 	responseTime       prometheus.Histogram
+
+	cpuUsage      *prometheus.GaugeVec
+	memoryUsage   *prometheus.GaugeVec
+	errorRate     *prometheus.GaugeVec
+	responseTimes *prometheus.SummaryVec
 }
 
 var (
@@ -26,6 +31,7 @@ var (
 	once              sync.Once
 )
 
+// NewCollector initializes and returns a new Collector (singleton).
 // NewCollector initializes and returns a new Collector (singleton).
 func NewCollector() *Collector {
 	once.Do(func() {
@@ -47,6 +53,27 @@ func NewCollector() *Collector {
 				Help:    "Histogram of response times",
 				Buckets: prometheus.DefBuckets,
 			}),
+			cpuUsage: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: "server_cpu_usage",
+				Help: "Current CPU usage percentage",
+			}, []string{"server_id"}),
+
+			memoryUsage: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: "server_memory_usage",
+				Help: "Current memory usage percentage",
+			}, []string{"server_id"}),
+
+			errorRate: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: "server_error_rate",
+				Help: "Current error rate (0-1)",
+			}, []string{"server_id"}),
+
+			// Modified responseTimes metric with new name and help text.
+			responseTimes: prometheus.NewSummaryVec(prometheus.SummaryOpts{
+				Name:       "http_response_time_seconds_summary",
+				Help:       "Response time percentiles (summary)",
+				Objectives: map[float64]float64{0.5: 0.05, 0.95: 0.01},
+			}, []string{"server_id"}),
 		}
 
 		// Register metrics with Prometheus
@@ -55,6 +82,11 @@ func NewCollector() *Collector {
 			collectorInstance.successfulRequests,
 			collectorInstance.failedRequests,
 			collectorInstance.responseTime,
+
+			collectorInstance.cpuUsage,
+			collectorInstance.memoryUsage,
+			collectorInstance.errorRate,
+			collectorInstance.responseTimes,
 		)
 	})
 
@@ -207,3 +239,87 @@ func calculateSuccessRate(serverID int) (float64, error) {
 	}
 	return float64(successCount) / float64(totalCount), nil
 }
+
+/*
+
+// FOR ML
+
+// Fix Get methods using Write()
+func (c *Collector) GetCurrentCPUUsage(serverID int) float64 {
+	gauge, err := c.cpuUsage.GetMetricWithLabelValues(fmt.Sprint(serverID))
+	if err != nil {
+		return 0
+	}
+
+	var m dto.Metric
+	if err := gauge.Write(&m); err != nil {
+		return 0
+	}
+
+	if m.Gauge != nil {
+		return m.Gauge.GetValue()
+	}
+	return 0
+}
+
+func (c *Collector) GetCurrentMemoryUsage(serverID int) float64 {
+	gauge, err := c.memoryUsage.GetMetricWithLabelValues(fmt.Sprint(serverID))
+	if err != nil {
+		return 0
+	}
+
+	var m dto.Metric
+	if err := gauge.Write(&m); err != nil {
+		return 0
+	}
+
+	if m.Gauge != nil {
+		return m.Gauge.GetValue()
+	}
+	return 0
+}
+
+func (c *Collector) GetErrorRate(serverID int) float64 {
+	gauge, err := c.errorRate.GetMetricWithLabelValues(fmt.Sprint(serverID))
+	if err != nil {
+		return 0
+	}
+
+	var m dto.Metric
+	if err := gauge.Write(&m); err != nil {
+		return 0
+	}
+
+	if m.Gauge != nil {
+		return m.Gauge.GetValue()
+	}
+	return 0
+}
+
+func (c *Collector) GetResponsePercentile(serverID int, percentile float64) float64 {
+	metricChan := make(chan prometheus.Metric, 1)
+	go func() {
+		c.responseTimes.Collect(metricChan)
+		close(metricChan)
+	}()
+
+	for metric := range metricChan {
+		var m dto.Metric
+		if err := metric.Write(&m); err != nil {
+			continue
+		}
+
+		if m.Summary == nil {
+			continue
+		}
+
+		for _, q := range m.Summary.Quantile {
+			if q.GetQuantile() == percentile {
+				return q.GetValue()
+			}
+		}
+	}
+
+	return 0
+}
+*/

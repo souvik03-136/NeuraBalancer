@@ -21,6 +21,7 @@ type Server struct {
 	Alive       bool
 	Weight      int
 	Connections int // Track active connections
+	Capacity    int // Add capacity field
 	mu          sync.Mutex
 }
 
@@ -46,6 +47,15 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 			serverID = -len(lb.servers) // Generate unique negative ID
 		}
 
+		capacity := 1 // Default capacity
+
+		if serverID > 0 {
+			capacity, err = database.GetServerCapacity(serverID)
+			if err != nil {
+				log.Printf("Using default capacity for %s: %v", serverURL, err)
+			}
+		}
+
 		weight := 1 // Default weight
 		if serverID > 0 {
 			weight, err = database.GetServerWeight(serverID)
@@ -54,9 +64,10 @@ func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
 			}
 		}
 		server := &Server{
-			ID:     serverID,
-			URL:    serverURL,
-			Weight: weight,
+			ID:       serverID,
+			URL:      serverURL,
+			Weight:   weight,
+			Capacity: capacity,
 		}
 		isActive, err := database.GetServerActiveStatus(serverID)
 		if err != nil {

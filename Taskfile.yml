@@ -1,6 +1,41 @@
 version: '3'
 
 tasks:
+  # 🔹 CORE SYSTEM ──────────────────────────────────────────────────
+  start-all:
+    desc: "Start entire system (with proper cleanup)"
+    cmds:
+      - task: kill-servers
+      - task: build-servers
+      - task: build
+      - task: run-servers
+      - task: run
+
+  kill-servers:
+    desc: "Force kill all backend servers (PowerShell)"
+    cmds:
+      - powershell -Command "try { Get-Process server5000,server5001,server5002 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {} ; exit 0"
+
+
+  run-servers:
+    desc: "Run servers with port checking"
+    cmds:
+      - powershell -Command "Start-Process -NoNewWindow .\bin\server5000.exe"
+      - powershell -Command "Start-Process -NoNewWindow .\bin\server5001.exe"
+      - powershell -Command "Start-Process -NoNewWindow .\bin\server5002.exe"
+      - timeout /t 5  # Increased timeout
+
+  build-servers:
+    desc: "Build servers with port validation"
+    cmds:
+      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5000).TcpTestSucceeded) { Write-Error 'Port 5000 in use!'; exit 1 }"
+      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5001).TcpTestSucceeded) { Write-Error 'Port 5001 in use!'; exit 1 }"
+      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5002).TcpTestSucceeded) { Write-Error 'Port 5002 in use!'; exit 1 }"
+      - go build -o bin/server5000.exe backend/cmd/server5000/main.go
+      - go build -o bin/server5001.exe backend/cmd/server5001/main.go
+      - go build -o bin/server5002.exe backend/cmd/server5002/main.go
+
+
   # 🔹 LOAD BALANCER ────────────────────────────────────────────────
   build:
     desc: "Build Load Balancer"
@@ -12,40 +47,7 @@ tasks:
     cmds:
       - go run backend/cmd/api/main.go
 
-  # 🔹 BACKEND SERVERS ───────────────────────────────────────────────
-  build-servers:
-    desc: "Build all backend servers"
-    cmds:
-      - go build -o bin/server5000.exe backend/cmd/server5000/main.go
-      - go build -o bin/server5001.exe backend/cmd/server5001/main.go
-      - go build -o bin/server5002.exe backend/cmd/server5002/main.go
-
-  run-servers:
-    desc: "Run all backend servers"
-    cmds:
-      - powershell -Command "Start-Process -NoNewWindow .\bin\server5000.exe"
-      - powershell -Command "Start-Process -NoNewWindow .\bin\server5001.exe"
-      - powershell -Command "Start-Process -NoNewWindow .\bin\server5002.exe"
-      - timeout /t 2
-
-  start-all:
-    desc: "Start entire system"
-    cmds:
-      - task: build-servers
-      - task: build
-      - task: run-servers
-      - task: run
-
-  kill-servers:
-    desc: "Kill all backend servers"
-    cmds:
-      - taskkill /IM server5000.exe /F /T || true
-      - taskkill /IM server5001.exe /F /T || true
-      - taskkill /IM server5002.exe /F /T || true
-
-
   # 🔹 DOCKER ─────────────────────────────────────────────────────────
-
   docker-build:
     desc: "Build Docker image for Load Balancer"
     cmds:
@@ -69,7 +71,6 @@ tasks:
       - docker push your-dockerhub-username/neura-balancer:latest
 
   # 🔹 KUBERNETES ──────────────────────────────────────────────────────
-
   k8s-deploy:
     desc: "Deploy Kubernetes manifests"
     cmds:
@@ -96,7 +97,6 @@ tasks:
       - kubectl rollout restart deployment backend
 
   # 🔹 HELM ────────────────────────────────────────────────────────────
-
   helm-deploy:
     desc: "Deploy using Helm"
     cmds:
@@ -113,7 +113,6 @@ tasks:
       - helm uninstall neura-balancer
 
   # 🔹 DATABASE ────────────────────────────────────────────────────────
-
   db-migrate:
     desc: "Run database migrations"
     cmds:
@@ -125,7 +124,6 @@ tasks:
       - docker exec -it db psql -U admin -d metrics_db -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
 
   # 🔹 MACHINE LEARNING ────────────────────────────────────────────────
-
   ml-train:
     desc: "Train AI Load Balancer model"
     cmds:
@@ -142,7 +140,6 @@ tasks:
       - go run ml/model-server/main.go
 
   # 🔹 CI/CD (GitHub Actions) ─────────────────────────────────────────
-
   ci:
     desc: "Run CI pipeline (Lint, Test, Build)"
     cmds:
@@ -156,7 +153,6 @@ tasks:
       - gh workflow run cd.yml -R your-repo/ai-load-balancer
 
   # 🔹 CLEANUP ────────────────────────────────────────────────────────
-
   clean:
     desc: "Remove built binaries & artifacts"
     cmds:

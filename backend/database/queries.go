@@ -189,3 +189,19 @@ func GetServerActiveStatus(serverID int) (bool, error) {
 	).Scan(&isActive)
 	return isActive, err
 }
+
+// method to get server capacity
+func GetServerCapacity(serverID int) (int, error) {
+	var capacity int
+	err := DB.QueryRow(`
+        SELECT capacity FROM servers 
+        WHERE id = $1`,
+		serverID,
+	).Scan(&capacity)
+
+	if err != nil {
+		log.Printf("Error getting capacity for server %d: %v", serverID, err)
+		return 1, err // Default capacity 1 if not found
+	}
+	return capacity, nil
+}

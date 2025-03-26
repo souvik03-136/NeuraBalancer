@@ -5,21 +5,24 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE TABLE servers (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    ip_address TEXT UNIQUE NOT NULL,
+    ip_address TEXT NOT NULL,
     port INTEGER NOT NULL,
     status TEXT CHECK (status IN ('active', 'inactive', 'down')) DEFAULT 'active',
     load INT DEFAULT 0,
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    last_checked TIMESTAMPTZ DEFAULT NOW(), -- Added last_checked column
+    weight INT DEFAULT 1, -- Added weight
+    capacity INT DEFAULT 1 -- Added capacity
 );
 
--- Requests log table
-CREATE TABLE request_logs (
+-- Requests table (logging requests per server)
+CREATE TABLE requests (
     id SERIAL PRIMARY KEY,
     server_id INTEGER REFERENCES servers(id) ON DELETE CASCADE,
-    request_time TIMESTAMPTZ DEFAULT NOW(),
+    status BOOLEAN NOT NULL, -- Changed from 'request_logs' table
     response_time FLOAT NOT NULL,
-    status_code INTEGER NOT NULL
+    timestamp TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Metrics table for historical tracking (Hypertable for TimescaleDB)
@@ -37,4 +40,5 @@ CREATE TABLE metrics (
 SELECT create_hypertable('metrics', 'timestamp');
 
 -- Index for optimizing query performance
-CREATE INDEX idx_request_logs_time ON request_logs(request_time DESC);
+CREATE INDEX idx_requests_time ON requests(timestamp DESC);
+CREATE INDEX idx_metrics_time ON metrics(timestamp DESC);

@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ml-service
+  template:
+    metadata:
+      labels:
+        app: ml-service
+    spec:
+      containers:
+      - name: ml-service
+        image: your-registry/ai-load-balancer-ml:latest
+        ports:
+        - containerPort: 8081
+        env:
+        - name: ML_SERVICE_PORT
+          value: "8081"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-service
+spec:
+  selector:
+    app: ml-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8081
