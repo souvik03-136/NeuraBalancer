@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/souvik03-136/neurabalancer/backend/database"
 )
 
@@ -240,8 +241,6 @@ func calculateSuccessRate(serverID int) (float64, error) {
 	return float64(successCount) / float64(totalCount), nil
 }
 
-/*
-
 // FOR ML
 
 // Fix Get methods using Write()
@@ -322,4 +321,3 @@ func (c *Collector) GetResponsePercentile(serverID int, percentile float64) floa
 
 	return 0
 }
-*/

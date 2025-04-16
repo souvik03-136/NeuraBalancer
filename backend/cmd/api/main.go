@@ -28,13 +28,12 @@ func main() {
 	}
 	defer database.CloseDB()
 
-	// Seed the random number generator for Random Selection strategy
+	// Seed the random number generator
 	rand.Seed(time.Now().UnixNano())
 
-	// Define server list (from ENV or fallback to defaults)
+	// Load server list from ENV or fallback
 	serverListEnv := os.Getenv("SERVERS")
 	var serverList []string
-
 	if serverListEnv == "" {
 		log.Println("No SERVERS environment variable found. Using default servers.")
 		serverList = []string{"http://localhost:5000", "http://localhost:5001", "http://localhost:5002"}
@@ -44,7 +43,7 @@ func main() {
 
 	// Register servers in database
 	for _, server := range serverList {
-		err := database.RegisterServer(server) // Auto-register in DB
+		err := database.RegisterServer(server)
 		if err != nil {
 			log.Printf("Failed to register server %s in DB: %v", server, err)
 		} else {
@@ -52,12 +51,12 @@ func main() {
 		}
 	}
 
-	// Wait a bit for servers to start
+	// Wait for servers to start
 	time.Sleep(2 * time.Second)
 
 	log.Println("Available Servers:", serverList)
 
-	// Check if servers are reachable
+	// Check server health
 	for _, server := range serverList {
 		if isServerUp(server) {
 			log.Printf("Server %s is UP!", server)
@@ -66,18 +65,30 @@ func main() {
 		}
 	}
 
-	// Define available load balancing strategies
+	// Load ML model endpoint
+	mlEndpoint := os.Getenv("ML_MODEL_ENDPOINT")
+	if mlEndpoint == "" {
+		mlEndpoint = "http://ml-service:8000"
+	}
 
+	// Initialize Metrics Collector
+	collector := metrics.NewCollector()
+
+	// Define load balancing strategies
 	roundRobin := &loadbalancer.RoundRobinStrategy{}
 	leastConnections := &loadbalancer.LeastConnectionsStrategy{}
 	weightedRoundRobin := &loadbalancer.WeightedRoundRobinStrategy{}
 	randomSelection := &loadbalancer.RandomSelectionStrategy{}
+	mlStrategy := loadbalancer.NewMLStrategy(mlEndpoint, collector)
 
-	// Select strategy from ENV (default: Round Robin)
+	// Select strategy from ENV
 	var strategy loadbalancer.Strategy
 	strategyEnv := strings.ToLower(os.Getenv("LB_STRATEGY"))
 
 	switch strategyEnv {
+	case "ml":
+		strategy = mlStrategy
+		log.Println("Using AI-Driven ML Strategy")
 	case "least_connections":
 		strategy = leastConnections
 	case "weighted_round_robin":
@@ -86,7 +97,7 @@ func main() {
 		strategy = randomSelection
 	case "round_robin":
 		strategy = roundRobin
-	default: // Default to Least Connections
+	default:
 		log.Println("No valid strategy found. Defaulting to Least Connections.")
 		strategyEnv = "least_connections"
 		strategy = leastConnections
@@ -94,31 +105,28 @@ func main() {
 
 	log.Println("Load Balancing Strategy:", strategyEnv)
 
-	// Initialize Echo framework
+	// Echo setup
 	e := echo.New()
-	e.Use(middleware.Logger())  // Request Logging
-	e.Use(middleware.Recover()) // Panic Recovery
-	e.Use(middleware.CORS())    // CORS Middleware
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+	e.Use(middleware.CORS())
 
-	// Initialize Metrics (singleton)
-	collector := metrics.NewCollector()
-
-	// Initialize Load Balancer with fallback
+	// Load Balancer with fallback server list
 	lb := loadbalancer.NewLoadBalancer(strategy, fallbackServerList(serverList))
 
-	// Register API routes with metrics integration
+	// Register routes
 	api.RegisterRoutes(e, lb, collector)
 
-	// Expose Prometheus metrics endpoint
+	// Prometheus metrics endpoint
 	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
 
-	// Define port (from ENV or fallback to 8080)
+	// Load port from ENV or fallback
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	// Start Load Balancer in a goroutine
+	// Start server
 	go func() {
 		log.Println("Starting Load Balancer on port", port)
 		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
@@ -126,13 +134,12 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown handling
+	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down server gracefully...")
 
-	// Context for graceful shutdown (timeout: 10 seconds)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -166,8 +173,6 @@ func fallbackServerList(serverList []string) []string {
 		log.Printf("DB error, using in-memory list: %v", err)
 		return serverList
 	}
-
-	// Directly use the server strings from DB
 	if len(servers) == 0 {
 		log.Println("No active servers in DB, falling back to original list")
 		return serverList

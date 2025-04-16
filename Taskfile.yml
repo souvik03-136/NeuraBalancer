@@ -5,6 +5,7 @@ tasks:
   start-all:
     desc: "Start entire system (with proper cleanup)"
     cmds:
+      - powershell -Command "New-Item -ItemType Directory -Path logs -Force"
       - task: kill-servers
       - task: build-servers
       - task: build
@@ -14,38 +15,37 @@ tasks:
   kill-servers:
     desc: "Force kill all backend servers (PowerShell)"
     cmds:
-      - powershell -Command "try { Get-Process server5000,server5001,server5002 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {} ; exit 0"
-
+      - powershell -Command "try { Get-Process server5000,server5001,server5002 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}; Write-Output 'Servers killed' | Tee-Object -FilePath logs/balancer.log -Append"
 
   run-servers:
     desc: "Run servers with port checking"
     cmds:
-      - powershell -Command "Start-Process -NoNewWindow .\bin\server5000.exe"
-      - powershell -Command "Start-Process -NoNewWindow .\bin\server5001.exe"
-      - powershell -Command "Start-Process -NoNewWindow .\bin\server5002.exe"
-      - timeout /t 5  # Increased timeout
+      - powershell -Command "Start-Process -NoNewWindow powershell -ArgumentList '-Command','.\bin\server5000.exe 2>&1 | Tee-Object -Append -FilePath logs/server5000.log'"
+      - powershell -Command "Start-Process -NoNewWindow powershell -ArgumentList '-Command','.\bin\server5001.exe 2>&1 | Tee-Object -Append -FilePath logs/server5001.log'"
+      - powershell -Command "Start-Process -NoNewWindow powershell -ArgumentList '-Command','.\bin\server5002.exe 2>&1 | Tee-Object -Append -FilePath logs/server5002.log'"
+      - timeout /t 5
 
   build-servers:
     desc: "Build servers with port validation"
     cmds:
-      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5000).TcpTestSucceeded) { Write-Error 'Port 5000 in use!'; exit 1 }"
-      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5001).TcpTestSucceeded) { Write-Error 'Port 5001 in use!'; exit 1 }"
-      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5002).TcpTestSucceeded) { Write-Error 'Port 5002 in use!'; exit 1 }"
-      - go build -o bin/server5000.exe backend/cmd/server5000/main.go
-      - go build -o bin/server5001.exe backend/cmd/server5001/main.go
-      - go build -o bin/server5002.exe backend/cmd/server5002/main.go
-
+      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5000).TcpTestSucceeded) { Write-Error 'Port 5000 in use!'; exit 1 } else { Write-Output 'Port 5000 available' | Tee-Object -FilePath logs/balancer.log -Append }"
+      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5001).TcpTestSucceeded) { Write-Error 'Port 5001 in use!'; exit 1 } else { Write-Output 'Port 5001 available' | Tee-Object -FilePath logs/balancer.log -Append }"
+      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5002).TcpTestSucceeded) { Write-Error 'Port 5002 in use!'; exit 1 } else { Write-Output 'Port 5002 available' | Tee-Object -FilePath logs/balancer.log -Append }"
+      - powershell -Command "go build -o bin/server5000.exe backend/cmd/server5000/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
+      - powershell -Command "go build -o bin/server5001.exe backend/cmd/server5001/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
+      - powershell -Command "go build -o bin/server5002.exe backend/cmd/server5002/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
 
   # 🔹 LOAD BALANCER ────────────────────────────────────────────────
   build:
     desc: "Build Load Balancer"
     cmds:
-      - go build -o bin/neura-balancer backend/cmd/api/main.go
+      - powershell -Command "go build -o bin/neura-balancer backend/cmd/api/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
 
   run:
     desc: "Run Load Balancer"
     cmds:
-      - go run backend/cmd/api/main.go
+      - powershell -Command "go run backend/cmd/api/main.go 2>&1 | Tee-Object -FilePath logs/balancer-run.log -Append"
+
 
   # 🔹 DOCKER ─────────────────────────────────────────────────────────
   docker-build:

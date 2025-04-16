@@ -1,8 +1,8 @@
 package loadbalancer
 
-/*
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -59,30 +59,110 @@ func (s *MLStrategy) collectFeatures(servers []*Server) []map[string]interface{}
 	return features
 }
 
-func (s *MLStrategy) getPrediction(features []map[string]interface{}) (int, error) {
-	payload, _ := json.Marshal(map[string]interface{}{
-		"features":      features,
-		"model_version": "v1",
-	})
-
-	resp, err := s.httpClient.Post(s.modelEndpoint+"/predict", "application/json", bytes.NewBuffer(payload))
+// getPredictions sends a batch request to the ML model endpoint and expects
+// a slice of float32 predictions (one per server).
+func (s *MLStrategy) getPredictions(payload map[string]interface{}) ([]float32, error) {
+	data, err := json.Marshal(payload)
 	if err != nil {
-		return -1, fmt.Errorf("model service unreachable: %w", err)
+		return nil, fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	resp, err := s.httpClient.Post(s.modelEndpoint+"/predict", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return nil, fmt.Errorf("model service unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return -1, fmt.Errorf("model service returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("model service returned %d", resp.StatusCode)
 	}
 
 	var result struct {
-		Prediction int `json:"prediction"`
+		Predictions []float32 `json:"predictions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return -1, fmt.Errorf("invalid response format: %w", err)
+		return nil, fmt.Errorf("invalid response format: %w", err)
 	}
 
-	return result.Prediction, nil
+	return result.Predictions, nil
+}
+
+// SelectServer chooses the best server using ML model predictions.
+// It uses a timeout context, circuit breaker, and retry logic.
+func (s *MLStrategy) SelectServer(servers []*Server) *Server {
+	// Create a timeout context for the model call.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// Check circuit breaker status.
+	if s.circuitBreaker.IsOpen() {
+		return s.fallbackStrategy.SelectServer(servers)
+	}
+
+	// Create batch request payload.
+	features := s.collectFeatures(servers)
+	payload := map[string]interface{}{
+		"servers": features,
+		"ts":      time.Now().Unix(),
+	}
+
+	// Add retry logic for model calls.
+	var predictions []float32
+	err := retry(3, 100*time.Millisecond, func() error {
+		// Marshal payload.
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %w", err)
+		}
+		// Create new request with the timeout context.
+		req, err := http.NewRequestWithContext(ctx, "POST", s.modelEndpoint+"/predict", bytes.NewBuffer(data))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("model service unreachable: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("model service returned %d", resp.StatusCode)
+		}
+
+		var result struct {
+			Predictions []float32 `json:"predictions"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Errorf("invalid response format: %w", err)
+		}
+		predictions = result.Predictions
+		return nil
+	})
+
+	// Handle fallback on error.
+	if err != nil || len(predictions) != len(servers) {
+		s.circuitBreaker.RecordFailure()
+		return s.fallbackStrategy.SelectServer(servers)
+	}
+
+	// Find server with best score (lowest prediction) that can handle the request.
+	var (
+		bestScore  = float32(math.MaxFloat32)
+		bestServer *Server
+	)
+	for i, server := range servers {
+		if score := predictions[i]; score < bestScore && server.CanHandleRequest() {
+			bestScore = score
+			bestServer = server
+		}
+	}
+
+	if bestServer != nil {
+		return bestServer
+	}
+	return s.fallbackStrategy.SelectServer(servers)
 }
 
 func (cb *CircuitBreaker) IsOpen() bool {
@@ -104,54 +184,36 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	cb.isOpen = false
 }
 
-func (s *MLStrategy) SelectServer(servers []*Server) *Server {
-	if s.circuitBreaker.IsOpen() {
-		return s.fallbackStrategy.SelectServer(servers)
-	}
-
-	// Generate cache key
-	cacheKey := generateCacheKey(servers)
-	if cached, ok := s.cache.Get(cacheKey); ok {
-		return cached.(*Server)
-	}
-
-	features := s.collectFeatures(servers)
-	prediction, err := s.getPrediction(features)
-
-	if err != nil {
-		s.circuitBreaker.RecordFailure()
-		return s.fallbackStrategy.SelectServer(servers)
-	}
-
-	s.circuitBreaker.RecordSuccess()
-
-	// Find best server based on prediction
-	var bestServer *Server
-	minTime := float32(math.MaxFloat32)
-	for _, server := range servers {
-		if prediction[server.ID] < minTime {
-			minTime = prediction[server.ID]
-			bestServer = server
+// retry is a helper function that retries the given function up to 'attempts'
+// times with the specified delay between attempts.
+func retry(attempts int, delay time.Duration, fn func() error) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = fn(); err == nil {
+			return nil
 		}
+		time.Sleep(delay)
 	}
-
-	if bestServer != nil {
-		s.cache.Add(cacheKey, bestServer)
-		return bestServer
-	}
-
-	return s.fallbackStrategy.SelectServer(servers)
+	return err
 }
 
-func generateCacheKey(servers []*Server) string {
+// generateCacheKey remains available for other uses if needed.
+func generateCacheKey(servers []*Server, collector *metrics.Collector) string {
 	var key strings.Builder
 	for _, s := range servers {
 		key.WriteString(fmt.Sprintf("%d-%.2f-%.2f",
 			s.ID,
-			s.metrics.GetCurrentCPUUsage(s.ID),
-			s.metrics.GetCurrentMemoryUsage(s.ID),
+			collector.GetCurrentCPUUsage(s.ID),
+			collector.GetCurrentMemoryUsage(s.ID),
 		))
 	}
 	return key.String()
 }
-*/
+
+// CanHandleRequest checks if the server can accept more requests.
+// It allows up to 2x over-provisioning.
+func (s *Server) CanHandleRequest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Connections < s.Capacity*2
+}
