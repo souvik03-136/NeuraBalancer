@@ -145,7 +145,7 @@ func main() {
 	if runtime.GOOS == "windows" {
 		onnxruntime_go.SetSharedLibraryPath("onnxruntime.dll")
 	} else {
-		onnxruntime_go.SetSharedLibraryPath("libonnxruntime.so.1.16.0")
+		onnxruntime_go.SetSharedLibraryPath("libonnxruntime.so.1.16.3")
 	}
 
 	if err := onnxruntime_go.InitializeEnvironment(); err != nil {
