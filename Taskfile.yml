@@ -124,20 +124,36 @@ tasks:
       - docker exec -it db psql -U admin -d metrics_db -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
 
   # 🔹 MACHINE LEARNING ────────────────────────────────────────────────
-  ml-train:
-    desc: "Train AI Load Balancer model"
+  ml-train-local:
+    desc: "Train model locally"
     cmds:
-      - python3 ml/training/train_model.py
+      - task: ml-prepare-dirs
+      - python ml/training/train_model.py
 
-  ml-infer:
-    desc: "Run inference on AI model"
+  ml-prepare-dirs:
+    desc: "Create required ML directories"
     cmds:
-      - python3 ml/utils/inference.py
+      - powershell -Command "New-Item -ItemType Directory -Force -Path ml/models"
 
-  ml-serve:
-    desc: "Start AI model inference server"
+  ml-serve-local:
+    desc: "Run ML model server locally"
     cmds:
-      - go run ml/model-server/main.go
+      - go run ml/model-server/main.go ml/model-server/router.go
+
+  run-balancer-ml:
+    desc: "Run load balancer with ML strategy"
+    cmds:
+      - powershell -Command "$env:LB_STRATEGY='ml'; $env:ML_MODEL_ENDPOINT='http://localhost:8081'; go run backend/cmd/api/main.go 2>&1 | Tee-Object -FilePath logs/balancer-ml.log -Append"
+
+  test-ml-flow:
+    desc: "Test full ML integration"
+    cmds:
+      - task: ml-serve-local
+      - task: run-balancer-ml
+      - timeout /t 5
+      - powershell -Command "curl.exe http://localhost:8081/health"
+      - powershell -Command "hey -n 100 -c 10 http://localhost:8080/request"
+      - powershell -Command "curl.exe http://localhost:8080/metrics | Select-String 'ml_'"
 
   # 🔹 CI/CD (GitHub Actions) ─────────────────────────────────────────
   ci:

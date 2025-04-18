@@ -1,80 +1,133 @@
 import pandas as pd
 import numpy as np
 import psycopg2
+import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-# 1. Enhanced Data Collection
+# Load environment variables from .env file
+load_dotenv()
+
+# Ensure feature set matches Go code
+FEATURES = [
+    "cpu_usage",
+    "memory_usage",
+    "active_conns",
+    "error_rate",
+    "response_p95",
+    "capacity"
+]
+
 def fetch_training_data():
-    conn = psycopg2.connect(
-        dbname="neura_balancer",
-        user="admin",
-        password="securepassword",
-        host="localhost"
-    )
+    conn = None
+    try:
+        # Get database credentials from environment variables
+        conn = psycopg2.connect(
+            dbname=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT")
+        )
+        
+        # Modified query with better time window handling
+        query = """
+        WITH matched_metrics AS (
+            SELECT 
+                r.id as request_id,
+                r.server_id,
+                m.cpu_usage,
+                m.memory_usage,
+                m.request_count,
+                s.capacity,
+                s.weight,
+                r.response_time,
+                r.timestamp,
+                r.status
+            FROM requests r
+            JOIN servers s ON r.server_id = s.id
+            LEFT JOIN metrics m ON r.server_id = m.server_id 
+                AND m.timestamp BETWEEN r.timestamp - INTERVAL '1 minute' AND r.timestamp
+        )
+        SELECT * FROM matched_metrics
+        WHERE timestamp >= NOW() - INTERVAL '7 days'
+        """
+        
+        df = pd.read_sql(query, conn)
+        print("Database connection successful. Retrieved data rows:", len(df))
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        return df
     
-    # Get data from last 24 hours with server metrics
-    query = """
-    SELECT 
-        s.id as server_id,
-        m.cpu_usage,
-        m.memory_usage,
-        m.request_count,
-        s.capacity,
-        s.weight,
-        r.response_time,
-        r.timestamp,
-        r.status
-    FROM requests r
-    JOIN servers s ON r.server_id = s.id
-    JOIN metrics m ON r.server_id = m.server_id 
-        AND m.timestamp BETWEEN r.timestamp - INTERVAL '5 seconds' AND r.timestamp
-    WHERE r.timestamp >= NOW() - INTERVAL '24 hours'
-    """
+    except psycopg2.Error as e:
+        print(f"Database connection error: {e}")
+        return pd.DataFrame()  # Return empty DataFrame on error
     
-    df = pd.read_sql(query, conn)
-    conn.close()
-    # Ensure timestamp is in datetime format
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    return df
+    finally:
+        if conn is not None:
+            conn.close()
+            print("Database connection closed")
 
-# 2. Advanced Feature Engineering
 def create_features(df):
-    # Calculate real error rate per server
-    total_requests = df.groupby('server_id')['request_count'].transform('sum')
-    error_counts = df.groupby('server_id')['status'].transform(lambda x: (x == False).sum())
-    df['error_rate'] = error_counts / total_requests.replace(0, 1)  # Avoid division by zero
-    
-    # Add temporal features
-    df['minute_of_day'] = df['timestamp'].dt.hour * 60 + df['timestamp'].dt.minute
-    df['sin_minute'] = np.sin(2 * np.pi * df['minute_of_day'] / 1440)
-    df['cos_minute'] = np.cos(2 * np.pi * df['minute_of_day'] / 1440)
-    
-    # Add rolling feature: 5-minute moving average for cpu_usage per server
-    df['cpu_ma_5m'] = df.groupby('server_id')['cpu_usage'].transform(
-        lambda x: x.rolling('5T', on=df['timestamp']).mean())
-    
-    # Select and return final features (handle missing values if necessary)
-    features = df[['cpu_usage', 'memory_usage', 'error_rate', 'sin_minute', 'cos_minute', 'cpu_ma_5m']]
-    return features
+    if df.empty:
+        print("No data available to create features")
+        return pd.DataFrame(columns=['server_id'] + FEATURES)
+        
+    # Aggregate per server
+    df['error'] = df['status'] == False
+    grouped = df.groupby('server_id')
 
-# 3. Calculate the target score for each sample
+    features_df = grouped.agg({
+        'cpu_usage': 'mean',
+        'memory_usage': 'mean',
+        'request_count': 'sum',
+        'error': 'sum',
+        'response_time': lambda x: np.percentile(x, 95),
+        'capacity': 'first'
+    }).rename(columns={
+        'error': 'error_count',
+        'request_count': 'active_conns',
+        'response_time': 'response_p95'
+    })
+
+    features_df['error_rate'] = features_df['error_count'] / features_df['active_conns'].replace(0, 1)
+    features_df = features_df.drop(columns=['error_count'])
+
+    # Reorder and ensure only required features
+    features_df = features_df[FEATURES].fillna(0)
+    return features_df.reset_index()
+
 def calculate_target(df):
-    """Calculate optimal server score based on historical performance.
-       This score is computed as a weighted sum of response time, cpu usage, and error rate.
-    """
+    if df.empty:
+        print("No data available to calculate target scores")
+        return pd.Series()
+        
     df['score'] = (df['response_time'] * 0.7 + 
                    df['cpu_usage'] * 0.2 + 
-                   df['error_rate'] * 0.1)
-    return df['score']
+                   ((df['status'] == False).astype(int)) * 0.1)
+    return df.groupby('server_id')['score'].mean().reset_index(drop=True)
 
-# Optional: Allow standalone execution for testing purposes
 if __name__ == "__main__":
-    # Fetch data and perform processing for quick testing
-    df = fetch_training_data()
-    features = create_features(df)
-    target = calculate_target(df)
+    # Verify environment variables are loaded
+    required_vars = ["DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT"]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
     
-    print("Sample features:")
-    print(features.head())
-    print("\nSample target scores:")
-    print(target.head())
+    if missing_vars:
+        print(f"Error: Missing environment variables: {', '.join(missing_vars)}")
+        print("Please ensure your .env file contains all required variables")
+        exit(1)
+    else:
+        print("All environment variables loaded successfully")
+        
+    # Fetch data and process
+    df = fetch_training_data()
+    
+    if not df.empty:
+        features = create_features(df)
+        target = calculate_target(df)
+        
+        print("Sample features:")
+        print(features.head())
+        print("\nSample target scores:")
+        print(target.head())
+    else:
+        print("Program terminated due to database connection failure")

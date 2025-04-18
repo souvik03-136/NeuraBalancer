@@ -88,16 +88,41 @@ func (s *MLStrategy) getPredictions(payload map[string]interface{}) ([]float32, 
 }
 
 // SelectServer chooses the best server using ML model predictions.
-// It uses a timeout context, circuit breaker, and retry logic.
+// It uses a timeout context, circuit breaker, retry logic, and caching.
 func (s *MLStrategy) SelectServer(servers []*Server) *Server {
-	// Create a timeout context for the model call.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
 	// Check circuit breaker status.
 	if s.circuitBreaker.IsOpen() {
 		return s.fallbackStrategy.SelectServer(servers)
 	}
+
+	// Generate cache key from server metrics
+	cacheKey := generateCacheKey(servers, s.metrics)
+
+	// Check if we have a cached prediction
+	if cachedPredictions, found := s.cache.Get(cacheKey); found {
+		predictions, ok := cachedPredictions.([]float32)
+		if ok && len(predictions) == len(servers) {
+			// Use cached predictions to select server
+			var (
+				bestScore  = float32(math.MaxFloat32)
+				bestServer *Server
+			)
+			for i, server := range servers {
+				if score := predictions[i]; score < bestScore && server.CanHandleRequest() {
+					bestScore = score
+					bestServer = server
+				}
+			}
+
+			if bestServer != nil {
+				return bestServer
+			}
+		}
+	}
+
+	// Create a timeout context for the model call.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 
 	// Create batch request payload.
 	features := s.collectFeatures(servers)
@@ -146,6 +171,12 @@ func (s *MLStrategy) SelectServer(servers []*Server) *Server {
 		s.circuitBreaker.RecordFailure()
 		return s.fallbackStrategy.SelectServer(servers)
 	}
+
+	// Store predictions in cache for future use
+	s.cache.Add(cacheKey, predictions)
+
+	// Reset circuit breaker on success
+	s.circuitBreaker.RecordSuccess()
 
 	// Find server with best score (lowest prediction) that can handle the request.
 	var (
@@ -197,7 +228,7 @@ func retry(attempts int, delay time.Duration, fn func() error) error {
 	return err
 }
 
-// generateCacheKey remains available for other uses if needed.
+// generateCacheKey creates a unique key based on server metrics for caching.
 func generateCacheKey(servers []*Server, collector *metrics.Collector) string {
 	var key strings.Builder
 	for _, s := range servers {

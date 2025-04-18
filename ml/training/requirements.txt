@@ -1,6 +1,8 @@
-pandas==2.2.3
-numpy==2.2.0
-psycopg2-binary==2.9.10
-scikit-learn==1.6.1
-torch==2.4.0
-onnx==1.17.0
+pandas
+numpy
+psycopg2-binary
+scikit-learn
+torch
+onnx
+python-dotenv
+sklearn

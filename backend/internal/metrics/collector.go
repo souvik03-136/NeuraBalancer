@@ -25,6 +25,11 @@ type Collector struct {
 	memoryUsage   *prometheus.GaugeVec
 	errorRate     *prometheus.GaugeVec
 	responseTimes *prometheus.SummaryVec
+
+	// ML Metrics Tracking
+	mlInferenceTime prometheus.Histogram
+	mlPredictions   prometheus.Counter
+	mlErrors        prometheus.Counter
 }
 
 var (
@@ -32,7 +37,6 @@ var (
 	once              sync.Once
 )
 
-// NewCollector initializes and returns a new Collector (singleton).
 // NewCollector initializes and returns a new Collector (singleton).
 func NewCollector() *Collector {
 	once.Do(func() {
@@ -75,6 +79,21 @@ func NewCollector() *Collector {
 				Help:       "Response time percentiles (summary)",
 				Objectives: map[float64]float64{0.5: 0.05, 0.95: 0.01},
 			}, []string{"server_id"}),
+
+			// Initialize ML metrics
+			mlInferenceTime: prometheus.NewHistogram(prometheus.HistogramOpts{
+				Name:    "ml_inference_time_seconds",
+				Help:    "Histogram of ML model inference times",
+				Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+			}),
+			mlPredictions: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "ml_predictions_total",
+				Help: "Total number of ML model predictions",
+			}),
+			mlErrors: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "ml_errors_total",
+				Help: "Total number of ML model errors",
+			}),
 		}
 
 		// Register metrics with Prometheus
@@ -88,6 +107,11 @@ func NewCollector() *Collector {
 			collectorInstance.memoryUsage,
 			collectorInstance.errorRate,
 			collectorInstance.responseTimes,
+
+			// Register ML metrics
+			collectorInstance.mlInferenceTime,
+			collectorInstance.mlPredictions,
+			collectorInstance.mlErrors,
 		)
 	})
 
@@ -241,9 +265,22 @@ func calculateSuccessRate(serverID int) (float64, error) {
 	return float64(successCount) / float64(totalCount), nil
 }
 
-// FOR ML
+// ML Metrics recording methods
 
-// Fix Get methods using Write()
+// RecordMLInference records ML inference time
+func (c *Collector) RecordMLInference(duration time.Duration) {
+	c.mlInferenceTime.Observe(duration.Seconds())
+	c.mlPredictions.Inc()
+}
+
+// RecordMLError increments the ML error counter
+func (c *Collector) RecordMLError() {
+	c.mlErrors.Inc()
+}
+
+// FOR ML feature extraction methods
+
+// GetCurrentCPUUsage gets the current CPU usage for a server
 func (c *Collector) GetCurrentCPUUsage(serverID int) float64 {
 	gauge, err := c.cpuUsage.GetMetricWithLabelValues(fmt.Sprint(serverID))
 	if err != nil {
@@ -261,6 +298,7 @@ func (c *Collector) GetCurrentCPUUsage(serverID int) float64 {
 	return 0
 }
 
+// GetCurrentMemoryUsage gets the current memory usage for a server
 func (c *Collector) GetCurrentMemoryUsage(serverID int) float64 {
 	gauge, err := c.memoryUsage.GetMetricWithLabelValues(fmt.Sprint(serverID))
 	if err != nil {
@@ -278,6 +316,7 @@ func (c *Collector) GetCurrentMemoryUsage(serverID int) float64 {
 	return 0
 }
 
+// GetErrorRate gets the current error rate for a server
 func (c *Collector) GetErrorRate(serverID int) float64 {
 	gauge, err := c.errorRate.GetMetricWithLabelValues(fmt.Sprint(serverID))
 	if err != nil {
@@ -295,6 +334,7 @@ func (c *Collector) GetErrorRate(serverID int) float64 {
 	return 0
 }
 
+// GetResponsePercentile gets a specific response time percentile for a server
 func (c *Collector) GetResponsePercentile(serverID int, percentile float64) float64 {
 	metricChan := make(chan prometheus.Metric, 1)
 	go func() {

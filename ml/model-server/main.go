@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -22,7 +21,11 @@ var (
 	modelLock sync.RWMutex
 )
 
-const expectedFeatureCount = 6
+const (
+	expectedFeatureCount = 6
+	modelPath            = "ml/models/load_balancer.onnx"
+	scalerPath           = "ml/models/scaler.json"
+)
 
 type Scaler struct {
 	Mean  []float32 `json:"mean"`
@@ -33,12 +36,47 @@ type PredictionResponse struct {
 	Scores []float32 `json:"scores"`
 }
 
+func validateFiles() error {
+	// Validate model file
+	if _, err := os.Stat(modelPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("model file missing: %s", modelPath)
+		}
+		return fmt.Errorf("error checking model file: %w", err)
+	}
+
+	// Validate scaler file
+	if _, err := os.Stat(scalerPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("scaler file missing: %s", scalerPath)
+		}
+		return fmt.Errorf("error checking scaler file: %w", err)
+	}
+
+	return nil
+}
+
 func loadScaler() error {
-	data, err := os.ReadFile("ml/models/scaler.json")
+	data, err := os.ReadFile(scalerPath)
 	if err != nil {
 		return fmt.Errorf("scaler file error: %w", err)
 	}
-	return json.Unmarshal(data, &scaler)
+
+	if err := json.Unmarshal(data, &scaler); err != nil {
+		return fmt.Errorf("scaler JSON parsing error: %w", err)
+	}
+
+	// Validate scaler content
+	if len(scaler.Mean) == 0 || len(scaler.Scale) == 0 {
+		return fmt.Errorf("invalid scaler data: empty mean or scale arrays")
+	}
+
+	if len(scaler.Mean) != expectedFeatureCount || len(scaler.Scale) != expectedFeatureCount {
+		return fmt.Errorf("invalid scaler dimensions: expected %d features, got mean:%d scale:%d",
+			expectedFeatureCount, len(scaler.Mean), len(scaler.Scale))
+	}
+
+	return nil
 }
 
 func normalize(features []float32) []float32 {
@@ -103,6 +141,12 @@ func predictHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate request content
+	if len(req.Servers) == 0 {
+		http.Error(w, "No servers provided in request", http.StatusBadRequest)
+		return
+	}
+
 	scores := make([]float32, len(req.Servers))
 	for i, srv := range req.Servers {
 		feats := []float32{
@@ -142,8 +186,13 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 func main() {
 	_ = godotenv.Load()
 
+	// Validate required files before initialization
+	if err := validateFiles(); err != nil {
+		log.Fatalf("File validation error: %v", err)
+	}
+
 	if runtime.GOOS == "windows" {
-		onnxruntime_go.SetSharedLibraryPath("onnxruntime.dll")
+		onnxruntime_go.SetSharedLibraryPath("C:/Users/souvi/OneDrive/Documents/GoLang/NeuraBalancer/onnxruntime-win-x64-1.21.0/lib/onnxruntime.dll")
 	} else {
 		onnxruntime_go.SetSharedLibraryPath("libonnxruntime.so.1.16.3")
 	}
@@ -165,7 +214,7 @@ func main() {
 
 	// Verify actual input/output names using Netron
 	session, err = onnxruntime_go.NewDynamicAdvancedSession(
-		"ml/models/load_balancer.onnx",
+		modelPath,
 		[]string{"serving_default_input:0"},   // Actual input name
 		[]string{"StatefulPartitionedCall:0"}, // Actual output name
 		opts,

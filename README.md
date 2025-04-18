@@ -97,20 +97,44 @@ The **AI-Driven Self-Optimizing Load Balancer** is a high-performance, **self-le
 ## **🚀 How to Launch**
 ### **1️⃣ Clone the Repository**
 ```bash
-git clone https://github.com/your-repo/ai-load-balancer.git
-cd ai-load-balancer
+git clone https://github.com/souvik03-136/NeuraBalancer.git
+cd NeuraBalancer
 ```
 
 ### **2️⃣ Set Up Environment Variables**
 Modify `.env` to match your setup:
 ```plaintext
-APP_PORT=8080
+# Application Port
+PORT=8080
+
+# PostgreSQL Database Credentials
 DB_HOST=localhost
-DB_PORT=5432
-DB_USER=admin
-DB_PASSWORD=securepassword
-ML_SERVER_HOST=http://ml-service
-PROMETHEUS_URL=http://prometheus:9090
+DB_SSLMODE=disable
+DB_CONTAINER_NAME=neura_db
+DB_NAME=neura_balancer
+DB_USER=myuser
+DB_PASSWORD=mypassword  # Ensure this is correct
+DB_PORT=5433
+
+# General Backend Config
+APP_ENV=development
+LOG_LEVEL=info
+
+# Load Balancing Strategy Selection
+# Options: least_connections, round_robin, weighted_round_robin, random, ml
+LB_STRATEGY=ml
+
+# Server List
+SERVERS=http://localhost:5000,http://localhost:5001,http://localhost:5002
+
+# Weights for Weighted Round Robin Strategy
+SERVER_5000_WEIGHT=2
+SERVER_5001_WEIGHT=1
+SERVER_5002_WEIGHT=3
+
+# ML Model Endpoint (used if LB_STRATEGY=ml)
+ML_MODEL_ENDPOINT=http://ml-service:8000
+
 ```
 
 ### **3️⃣ Start Services with Docker Compose**
@@ -162,7 +186,7 @@ kubectl apply -f deployments/k8s/
 
 
 ```plaintext
-📂 ai-load-balancer/
+📂 NeuraBalancer/
 │── 📂 .github/                   # GitHub Actions (CI/CD) workflows
 │   ├── workflows/
 │   │   ├── ci.yml                # CI: Build, test, lint
@@ -202,9 +226,6 @@ kubectl apply -f deployments/k8s/
 │   │   ├── data_preprocessing.py  # Data cleaning & processing
 │   ├── 📂 models/                  # Trained models
 │   │   ├── load_balancer.onnx     # Pre-trained model file
-│   ├── 📂 utils/                   # ML utilities
-│   │   ├── inference.py           # Runs model inference
-│   │   ├── trainer.py             # Model training functions
 │── 📂 deployments/                 # Kubernetes & Helm deployment scripts
 │   ├── 📂 k8s/                     # K8s manifests
 │   │   ├── backend-deployment.yaml # Backend service deployment

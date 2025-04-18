@@ -21,6 +21,6 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"model_version": "1.2.0",
-		"onnx_version":  "1.12.0",
+		"onnx_version":  "1.21.0",
 	})
 }
