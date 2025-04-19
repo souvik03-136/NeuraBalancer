@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: Define test cases
+:: Define test cases (load balancing strategies)
 set strategies=round_robin least_connections weighted_round_robin random
 
 :: Function to kill process running on port 8080

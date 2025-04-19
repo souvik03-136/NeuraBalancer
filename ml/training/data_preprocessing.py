@@ -21,7 +21,7 @@ FEATURES = [
 def fetch_training_data():
     conn = None
     try:
-        # Get database credentials from environment variables
+
         conn = psycopg2.connect(
             dbname=os.getenv("DB_NAME"),
             user=os.getenv("DB_USER"),

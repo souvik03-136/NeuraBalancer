@@ -39,6 +39,17 @@ CREATE TABLE metrics (
 -- Convert the metrics table into a hypertable for efficient time-series querying
 SELECT create_hypertable('metrics', 'timestamp');
 
--- Index for optimizing query performance
+-- Create attempts table (tracking attempts to interact with servers)
+CREATE TABLE attempts (
+    id SERIAL PRIMARY KEY,
+    server_id INT NOT NULL REFERENCES servers(id),
+    success BOOLEAN NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Add index for faster queries on attempts table
+CREATE INDEX idx_attempts_server_time ON attempts (server_id, timestamp);
+
+-- Indexes for optimizing query performance
 CREATE INDEX idx_requests_time ON requests(timestamp DESC);
 CREATE INDEX idx_metrics_time ON metrics(timestamp DESC);

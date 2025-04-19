@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/url"
@@ -204,4 +205,15 @@ func GetServerCapacity(serverID int) (int, error) {
 		return 1, err // Default capacity 1 if not found
 	}
 	return capacity, nil
+}
+
+// Track all attempts including retries
+func InsertAttempt(ctx context.Context, serverID int, success bool) error {
+	_, err := DB.ExecContext(ctx, `
+        INSERT INTO attempts 
+            (server_id, success, timestamp)
+        VALUES ($1, $2, NOW())`,
+		serverID, success,
+	)
+	return err
 }

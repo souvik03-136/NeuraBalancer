@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -189,6 +190,17 @@ func (c *Collector) RecordRequest(serverID int, success bool, duration time.Dura
 	); err != nil {
 		log.Printf(" Failed to insert metrics (Server %d): %v", serverID, err)
 	}
+
+	// Store in both tables
+	if err := database.InsertRequest(serverID, success, duration); err != nil {
+		log.Printf("Failed to log request: %v", err)
+	}
+
+	// Create a background context for the InsertAttempt call
+	ctx := context.Background()
+	if err := database.InsertAttempt(ctx, serverID, success); err != nil {
+		log.Printf("Failed to log attempt: %v", err)
+	}
 }
 
 // Helper function to clamp values between min and max
@@ -248,21 +260,20 @@ func getActualServerMetrics(serverID int) (float64, float64, error) {
 
 // calculateSuccessRate calculates the success rate for a server based on recent requests.
 func calculateSuccessRate(serverID int) (float64, error) {
-	var successCount, totalCount int
-	_ = database.DB.QueryRow(`
+	var attempts, successes int
+	err := database.DB.QueryRow(`
         SELECT 
-            COUNT(*) FILTER (WHERE status = true),
-            COUNT(*)
-        FROM requests
-        WHERE server_id = $1
-        AND timestamp > NOW() - INTERVAL '5 minutes'`, // Reduced window
+            COUNT(*) FILTER (WHERE server_id = $1),
+            COUNT(*) FILTER (WHERE server_id = $1 AND success = true)
+        FROM attempts 
+        WHERE timestamp > NOW() - INTERVAL '5 minutes'`,
 		serverID,
-	).Scan(&successCount, &totalCount)
+	).Scan(&attempts, &successes)
 
-	if totalCount == 0 {
-		return 0, nil // No data = 0% success rate
+	if attempts == 0 {
+		return 1.0, nil // Assume 100% success if no data
 	}
-	return float64(successCount) / float64(totalCount), nil
+	return float64(successes) / float64(attempts), err
 }
 
 // ML Metrics recording methods

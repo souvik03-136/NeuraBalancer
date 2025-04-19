@@ -8,7 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: production
+    # Removing the problematic environment line
     steps:
     - uses: actions/checkout@v4
     
@@ -21,9 +21,11 @@ jobs:
         helm dependency update
         helm package .
     
-    - name: Deploy to Kubernetes
-      uses: argoproj/argo-cd-github-actions@main
+    - name: Deploy to Kubernetes with ArgoCD
+      uses: clowdhaus/argo-cd-action@v1.12.0
       with:
-        argocd-server: ${{ secrets.ARGOCD_SERVER }}
-        argocd-token: ${{ secrets.ARGOCD_TOKEN }}
-        command: app create --file deployments/helm/values-production.yaml
+        command: app
+        options: create neurabalancer --repo https://github.com/${{ github.repository }} --path deployments/helm --dest-server https://kubernetes.default.svc --dest-namespace default --values values-production.yaml
+      env:
+        ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+        ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_TOKEN }}

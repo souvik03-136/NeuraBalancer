@@ -229,9 +229,19 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header = r.Header.Clone()
 
+	// Record initial attempt before processing
+	if err := database.InsertAttempt(r.Context(), server.ID, false); err != nil {
+		log.Printf("Failed to log initial attempt: %v", err)
+	}
+
 	// Forward request
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		// Record failed attempt
+		if err := database.InsertAttempt(r.Context(), server.ID, false); err != nil {
+			log.Printf("Failed to log failed attempt: %v", err)
+		}
+
 		// Mark server as down immediately
 		server.mu.Lock()
 		server.Alive = false
@@ -249,6 +259,11 @@ func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// Record successful attempt
+	if err := database.InsertAttempt(r.Context(), server.ID, true); err != nil {
+		log.Printf("Failed to log successful attempt: %v", err)
+	}
 
 	// Copy response
 	success = resp.StatusCode < 500
