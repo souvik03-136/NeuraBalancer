@@ -179,7 +179,7 @@ task clean
 ```
 
 ## 📘 Detailed Documentation
-For in-depth information about system architecture, component details, and theory behind the ML-based load balancing, please see [DOCUMENTATION.md](documentation/DOCUMENTATION.md).
+For in-depth information about system architecture, component details, and theory behind the ML-based load balancing, please see [DOCUMENTATION.md](Documentation/DOCUMENTATION.md).
 
 ## 📌 API Endpoints
 
