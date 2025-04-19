@@ -16,13 +16,13 @@ The **AI-Driven Self-Optimizing Load Balancer** is a high-performance, **self-le
 
 ```mermaid
 graph TD
-    A[🌍 Clients (Users)] -->|Requests API| B[API Gateway (NGINX) - Reverse Proxy, Rate Limiting, Initial LB (Lua)]
-    B -->|Routes Traffic| C[Load Balancer (Go + Echo) - Main Traffic Router, Fetches Server Health, Calls ML Model for LB]
-    C -->|Predicts Best Server| D[ML Model Service (ONNX) - Predicts Best Server]
-    C -->|Collects Metrics| E[Metrics Collector - Prometheus, TimescaleDB]
-    D -->|Provides Best Server| F[Backend Services - API Services]
-    E -->|Stores Metrics| G[Observability Stack - Grafana, Loki, Jaeger]
-    F -->|Delivers Response| A
+    A["Clients (Users)"] -->|"Requests API"| B["API Gateway (NGINX)"]
+    B -->|"Routes Traffic"| C["Load Balancer (Go + Echo)"]
+    C -->|"Predicts Best Server"| D["ML Model Service (ONNX)"]
+    C -->|"Collects Metrics"| E["Metrics Collector"]
+    D -->|"Provides Best Server"| F["Backend Services"]
+    E -->|"Stores Metrics"| G["Observability Stack"]
+    F -->|"Delivers Response"| A
 ```
 
 ### **🔹 Core Components**
