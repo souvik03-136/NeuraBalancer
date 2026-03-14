@@ -122,7 +122,11 @@ func newModelServer(cfg serverConfig) (*modelServer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("session options: %w", err)
 	}
-	defer opts.Destroy()
+	defer func() {
+		if err := opts.Destroy(); err != nil {
+			log.Printf("opts destroy error: %v", err)
+		}
+	}()
 
 	// FIX: input/output names now match what PyTorch onnx.export produces.
 	// Training code exports with input_names=['features'], output_names=['predicted_score'].
@@ -156,14 +160,22 @@ func (ms *modelServer) predict(features []float32) (float32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("input tensor: %w", err)
 	}
-	defer inTensor.Destroy()
+	defer func() {
+		if err := inTensor.Destroy(); err != nil {
+			log.Printf("inTensor destroy error: %v", err)
+		}
+	}()
 
 	outShape := ort.NewShape(1, 1)
 	outTensor, err := ort.NewEmptyTensor[float32](outShape)
 	if err != nil {
 		return 0, fmt.Errorf("output tensor: %w", err)
 	}
-	defer outTensor.Destroy()
+	defer func() {
+		if err := outTensor.Destroy(); err != nil {
+			log.Printf("outTensor destroy error: %v", err)
+		}
+	}()
 
 	if err := ms.session.Run(
 		[]ort.ArbitraryTensor{inTensor},
@@ -263,16 +275,23 @@ func (ms *modelServer) handleVersion(w http.ResponseWriter, r *http.Request) {
 func main() {
 	cfg := loadConfig()
 
-	ms, err := newModelServer(cfg)
+	var ms *modelServer
+	defer func() {
+		if ms != nil && ms.session != nil {
+			if err := ms.session.Destroy(); err != nil {
+				log.Printf("session destroy error: %v", err)
+			}
+		}
+		if err := ort.DestroyEnvironment(); err != nil {
+			log.Printf("ort destroy error: %v", err)
+		}
+	}()
+
+	var err error
+	ms, err = newModelServer(cfg)
 	if err != nil {
 		log.Fatalf("model server init failed: %v", err)
 	}
-	defer func() {
-		if ms.session != nil {
-			ms.session.Destroy()
-		}
-		ort.DestroyEnvironment()
-	}()
 
 	r := mux.NewRouter()
 	r.HandleFunc("/health", ms.handleHealth).Methods(http.MethodGet)

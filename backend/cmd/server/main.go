@@ -49,7 +49,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "logger init failed: %v\n", err)
 		os.Exit(1)
 	}
-	_ = logLevel // zap level configured above; extend if needed
+	_ = logLevel        // zap level configured above; extend if needed
 	defer logger.Sync() //nolint:errcheck
 
 	// ── Metrics loop ──────────────────────────────────────────────────────────

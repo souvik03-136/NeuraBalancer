@@ -42,15 +42,15 @@ type LBConfig struct {
 }
 
 type DatabaseConfig struct {
-	Host               string        // DB_HOST
-	Port               int           // DB_PORT
-	Name               string        // DB_NAME
-	User               string        // DB_USER
-	Password           string        // DB_PASSWORD
-	SSLMode            string        // DB_SSLMODE
-	MaxOpenConns       int           // DB_MAX_OPEN_CONNS
-	MaxIdleConns       int           // DB_MAX_IDLE_CONNS
-	ConnMaxLifetime    time.Duration // DB_CONN_MAX_LIFETIME_MINUTES
+	Host            string        // DB_HOST
+	Port            int           // DB_PORT
+	Name            string        // DB_NAME
+	User            string        // DB_USER
+	Password        string        // DB_PASSWORD
+	SSLMode         string        // DB_SSLMODE
+	MaxOpenConns    int           // DB_MAX_OPEN_CONNS
+	MaxIdleConns    int           // DB_MAX_IDLE_CONNS
+	ConnMaxLifetime time.Duration // DB_CONN_MAX_LIFETIME_MINUTES
 }
 
 type RedisConfig struct {
@@ -60,10 +60,10 @@ type RedisConfig struct {
 }
 
 type MLConfig struct {
-	Endpoint              string        // ML_MODEL_ENDPOINT
-	TimeoutMs             int           // ML_MODEL_TIMEOUT_MS
-	CircuitBreakerResetSec int          // ML_CIRCUIT_BREAKER_RESET_SECONDS
-	CacheSize             int           // ML_CACHE_SIZE
+	Endpoint               string // ML_MODEL_ENDPOINT
+	TimeoutMs              int    // ML_MODEL_TIMEOUT_MS
+	CircuitBreakerResetSec int    // ML_CIRCUIT_BREAKER_RESET_SECONDS
+	CacheSize              int    // ML_CACHE_SIZE
 }
 
 type TelemetryConfig struct {
@@ -116,10 +116,10 @@ func Load() (*Config, error) {
 			DB:       getEnvInt("REDIS_DB", 0),
 		},
 		ML: MLConfig{
-			Endpoint:              getEnv("ML_MODEL_ENDPOINT", "http://ml-service:8081"),
-			TimeoutMs:             getEnvInt("ML_MODEL_TIMEOUT_MS", 300),
+			Endpoint:               getEnv("ML_MODEL_ENDPOINT", "http://ml-service:8081"),
+			TimeoutMs:              getEnvInt("ML_MODEL_TIMEOUT_MS", 300),
 			CircuitBreakerResetSec: getEnvInt("ML_CIRCUIT_BREAKER_RESET_SECONDS", 30),
-			CacheSize:             getEnvInt("ML_CACHE_SIZE", 1000),
+			CacheSize:              getEnvInt("ML_CACHE_SIZE", 1000),
 		},
 		Telemetry: TelemetryConfig{
 			OTELEnabled:       getEnvBool("OTEL_ENABLED", true),

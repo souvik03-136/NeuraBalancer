@@ -50,12 +50,15 @@ func StructuredLogger(logger *zap.Logger) echo.MiddlewareFunc {
 			if err != nil {
 				fields = append(fields, zap.Error(err))
 				logger.Error("request error", fields...)
-			} else if res.Status >= 500 {
-				logger.Error("server error", fields...)
-			} else if res.Status >= 400 {
-				logger.Warn("client error", fields...)
 			} else {
-				logger.Info("request", fields...)
+				switch {
+				case res.Status >= 500:
+					logger.Error("server error", fields...)
+				case res.Status >= 400:
+					logger.Warn("client error", fields...)
+				default:
+					logger.Info("request", fields...)
+				}
 			}
 
 			return err

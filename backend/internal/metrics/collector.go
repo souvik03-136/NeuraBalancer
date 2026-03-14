@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,17 +21,16 @@ import (
 type Collector struct {
 	db     *database.DB
 	logger *zap.Logger
-	mu     sync.Mutex
 
 	// HTTP traffic counters
-	httpTotal      *prometheus.CounterVec
-	httpDuration   *prometheus.HistogramVec
+	httpTotal    *prometheus.CounterVec
+	httpDuration *prometheus.HistogramVec
 
 	// Per-server gauges (labeled by server_id)
-	cpuUsage     *prometheus.GaugeVec
-	memoryUsage  *prometheus.GaugeVec
-	errorRate    *prometheus.GaugeVec
-	activeConns  *prometheus.GaugeVec
+	cpuUsage        *prometheus.GaugeVec
+	memoryUsage     *prometheus.GaugeVec
+	errorRate       *prometheus.GaugeVec
+	activeConns     *prometheus.GaugeVec
 	responseSummary *prometheus.SummaryVec
 
 	// ML model metrics
@@ -197,9 +195,9 @@ func (c *Collector) RecordMLInference(d time.Duration) {
 	c.mlPredictions.Inc()
 }
 
-func (c *Collector) RecordMLError()      { c.mlErrors.Inc() }
-func (c *Collector) RecordMLCacheHit()   { c.mlCacheHits.Inc() }
-func (c *Collector) RecordMLCacheMiss()  { c.mlCacheMisses.Inc() }
+func (c *Collector) RecordMLError()     { c.mlErrors.Inc() }
+func (c *Collector) RecordMLCacheHit()  { c.mlCacheHits.Inc() }
+func (c *Collector) RecordMLCacheMiss() { c.mlCacheMisses.Inc() }
 func (c *Collector) SetCircuitOpen(open bool) {
 	if open {
 		c.mlCircuitOpen.Set(1)

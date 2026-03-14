@@ -14,19 +14,6 @@ import (
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
 )
 
-// stubLB is a minimal LoadBalancer whose Servers() returns a fixed list.
-type stubLB struct {
-	servers []*loadbalancer.Server
-}
-
-func (s *stubLB) Servers() []*loadbalancer.Server { return s.servers }
-func (s *stubLB) NextServer(_ interface{}) (*loadbalancer.Server, error) {
-	return s.servers[0], nil
-}
-func (s *stubLB) ReleaseServer(*loadbalancer.Server)              {}
-func (s *stubLB) ProxyRequest(http.ResponseWriter, *http.Request) {}
-func (s *stubLB) Stop()                                           {}
-
 func newTestHandler() (*api.Handler, *echo.Echo) {
 	logger := zap.NewNop()
 	lb := &loadbalancer.LoadBalancer{}

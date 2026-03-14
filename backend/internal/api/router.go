@@ -27,7 +27,7 @@ func NewRouter(lb *loadbalancer.LoadBalancer, logger *zap.Logger, serviceName st
 	h := NewHandler(lb, logger)
 
 	// ── Health / readiness probes (no auth required) ─────────────────────────
-	e.GET("/health/live",  h.HealthCheck)
+	e.GET("/health/live", h.HealthCheck)
 	e.GET("/health/ready", h.ReadinessCheck)
 
 	// ── Prometheus scrape endpoint ────────────────────────────────────────────

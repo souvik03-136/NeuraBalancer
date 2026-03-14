@@ -23,14 +23,14 @@ import (
 // Falls back to WeightedRoundRobin when the circuit breaker is open or the
 // model service is unavailable.
 type MLStrategy struct {
-	endpoint        string
-	timeout         time.Duration
-	client          *http.Client
-	col             *metrics.Collector
-	cb              *circuitBreaker
-	fallback        Strategy
-	cache           *lru.Cache[string, []float32]
-	logger          *zap.Logger
+	endpoint string
+	timeout  time.Duration
+	client   *http.Client
+	col      *metrics.Collector
+	cb       *circuitBreaker
+	fallback Strategy
+	cache    *lru.Cache[string, []float32]
+	logger   *zap.Logger
 }
 
 // NewMLStrategy constructs an MLStrategy from config.
