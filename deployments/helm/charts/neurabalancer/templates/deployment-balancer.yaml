@@ -1,0 +1,85 @@
+{{- /* File: deployments/helm/charts/neurabalancer/templates/deployment-balancer.yaml */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "neurabalancer.fullname" . }}-balancer
+  labels: {{ include "neurabalancer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: balancer
+      {{ include "neurabalancer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: balancer
+        {{ include "neurabalancer.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.lb.port }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: balancer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.lb.port }}
+              protocol: TCP
+          env:
+            - name: APP_PORT
+              value: "{{ .Values.lb.port }}"
+            - name: LB_STRATEGY
+              value: {{ .Values.lb.strategy | quote }}
+            - name: SERVERS
+              value: {{ range $i, $e := until (int .Values.backend.replicaCount) }}{{ if $i }},{{ end }}http://{{ include "neurabalancer.fullname" $ }}-backend-{{ $i }}:8001{{ end }}
+            - name: ML_MODEL_ENDPOINT
+              value: "http://{{ include "neurabalancer.fullname" . }}-ml:8081"
+            - name: DB_HOST
+              value: {{ .Values.db.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: DB_NAME
+              value: {{ .Values.db.name | quote }}
+            - name: DB_USER
+              value: {{ .Values.db.user | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "neurabalancer.fullname" . }}-secrets
+                  key: db-password
+            - name: DB_SSLMODE
+              value: {{ .Values.db.sslmode | quote }}
+            - name: OTEL_ENABLED
+              value: {{ .Values.observability.otelEnabled | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: neurabalancer
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlpEndpoint | quote }}
+            - name: LOG_FORMAT
+              value: json
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          resources: {{ toYaml .Values.resources.loadBalancer | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

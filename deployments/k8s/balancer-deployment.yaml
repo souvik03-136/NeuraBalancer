@@ -1,0 +1,111 @@
+# File: deployments/k8s/balancer-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neurabalancer-lb
+  labels:
+    app: neurabalancer
+    component: load-balancer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: neurabalancer
+      component: load-balancer
+  template:
+    metadata:
+      labels:
+        app: neurabalancer
+        component: load-balancer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: load-balancer
+          image: ghcr.io/souvik03-136/neurabalancer-load-balancer:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: neurabalancer-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: neurabalancer-secrets
+                  key: db-password
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neurabalancer-lb
+  labels:
+    app: neurabalancer
+    component: load-balancer
+spec:
+  selector:
+    app: neurabalancer
+    component: load-balancer
+  type: ClusterIP
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neurabalancer-config
+  labels:
+    app: neurabalancer
+data:
+  APP_ENV: production
+  APP_PORT: "8080"
+  LOG_LEVEL: info
+  LOG_FORMAT: json
+  LB_STRATEGY: least_connections
+  SERVERS: "http://neurabalancer-backend:8001"
+  DB_HOST: timescaledb
+  DB_PORT: "5432"
+  DB_NAME: neurabalancer
+  DB_USER: neura_user
+  DB_SSLMODE: require
+  ML_MODEL_ENDPOINT: "http://neurabalancer-ml:8081"
+  OTEL_ENABLED: "true"
+  OTEL_SERVICE_NAME: neurabalancer
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  HEALTH_CHECK_INTERVAL_SECONDS: "5"
+  HEALTH_CHECK_TIMEOUT_SECONDS: "3"
+  HEALTH_CHECK_RETRIES: "3"

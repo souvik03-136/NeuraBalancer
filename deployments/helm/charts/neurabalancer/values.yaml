@@ -1,0 +1,87 @@
+# File: deployments/helm/charts/neurabalancer/values.yaml
+# Default values for the NeuraBalancer Helm chart.
+# Override with --set or a custom values file.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/souvik03-136/neurabalancer-load-balancer
+  tag: latest
+  pullPolicy: IfNotPresent
+
+backend:
+  replicaCount: 3
+  image:
+    repository: ghcr.io/souvik03-136/neurabalancer-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+mlService:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/souvik03-136/neurabalancer-ml-service
+    tag: latest
+    pullPolicy: IfNotPresent
+  modelPath: /app/models/load_balancer.onnx
+  scalerPath: /app/models/scaler.json
+
+lb:
+  strategy: least_connections
+  port: 8080
+
+db:
+  host: timescaledb
+  port: 5432
+  name: neurabalancer
+  user: neura_user
+  password: ""          # Set via --set db.password=... or a Secret
+  sslmode: require
+
+redis:
+  addr: redis:6379
+  password: ""
+
+observability:
+  otelEnabled: true
+  otlpEndpoint: http://otel-collector:4317
+  prometheusEnabled: true
+
+grafana:
+  adminPassword: ""     # Set via --set grafana.adminPassword=...
+
+resources:
+  loadBalancer:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+  backend:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: neurabalancer.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

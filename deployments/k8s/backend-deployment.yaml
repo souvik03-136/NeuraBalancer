@@ -1,11 +1,67 @@
-env:
-  - name: DB_HOST
-    value: "timescaledb"
-  - name: DB_PORT
-    value: "5432"
-  - name: DB_USER
-    value: "admin"
-  - name: DB_PASSWORD
-    value: "password"
-  - name: DB_NAME
-    value: "metrics_db"
+# File: deployments/k8s/backend-deployment.yaml
+# Raw Kubernetes manifests for reference / ArgoCD sync.
+# For production, prefer the Helm chart in deployments/helm/.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neurabalancer-backend
+  labels:
+    app: neurabalancer
+    component: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: neurabalancer
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: neurabalancer
+        component: backend
+      annotations:
+        prometheus.io/scrape: "false"   # backend metrics fetched by LB, not scraped directly
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: backend
+          image: ghcr.io/souvik03-136/neurabalancer-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8001
+          env:
+            - name: BACKEND_PORT
+              value: "8001"
+            - name: BACKEND_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name   # pod name as instance ID
+            - name: LOG_FORMAT
+              value: json
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

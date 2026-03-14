@@ -1,0 +1,16 @@
+# File: deployments/helm/charts/neurabalancer/Chart.yaml
+apiVersion: v2
+name: neurabalancer
+description: AI-driven self-optimising HTTP load balancer
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - load-balancer
+  - ai
+  - ml
+  - observability
+maintainers:
+  - name: souvik03-136
+sources:
+  - https://github.com/souvik03-136/neurabalancer

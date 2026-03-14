@@ -1,0 +1,176 @@
+{
+  "__comment": "File: configs/grafana/dashboards/neurabalancer-overview.json",
+  "title": "NeuraBalancer — Overview",
+  "uid": "neurabalancer-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "tags": ["neurabalancer"],
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "server_id",
+        "label": "Server",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(neurabalancer_server_active_connections, server_id)",
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Requests / sec",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(neurabalancer_http_requests_total[1m]))",
+          "legendFormat": "req/s"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Request Duration P95 (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by(le, server_id) (rate(neurabalancer_http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "{{server_id}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Error Rate %",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(neurabalancer_http_requests_total{status=~\"5..\"}[1m])) / sum(rate(neurabalancer_http_requests_total[1m]))",
+          "legendFormat": "error %"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Active Connections by Server",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "neurabalancer_server_active_connections{server_id=~\"$server_id\"}",
+          "legendFormat": "{{server_id}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "CPU Usage % by Server",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "neurabalancer_server_cpu_usage_percent{server_id=~\"$server_id\"}",
+          "legendFormat": "{{server_id}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Memory Usage % by Server",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "neurabalancer_server_memory_usage_percent{server_id=~\"$server_id\"}",
+          "legendFormat": "{{server_id}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "ML Predictions / sec",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(neurabalancer_ml_predictions_total[1m])",
+          "legendFormat": "pred/s"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "ML Circuit Breaker",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "neurabalancer_ml_circuit_breaker_open",
+          "legendFormat": "open"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "CLOSED", "color": "green" }, "1": { "text": "OPEN", "color": "red" } }, "type": "value" }
+          ]
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "ML Cache Hit Rate %",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "100 * rate(neurabalancer_ml_cache_hits_total[5m]) / (rate(neurabalancer_ml_cache_hits_total[5m]) + rate(neurabalancer_ml_cache_misses_total[5m]))",
+          "legendFormat": "hit %"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "ML Inference P95 (ms)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "1000 * histogram_quantile(0.95, rate(neurabalancer_ml_inference_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95 ms"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Logs",
+      "type": "logs",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service=\"load-balancer\"} | json",
+          "legendFormat": ""
+        }
+      ]
+    }
+  ]
+}

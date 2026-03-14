@@ -1,0 +1,6 @@
+# File: ml/models/.gitkeep
+# This directory holds generated model artefacts (gitignored).
+# Run `task ml-train` to generate:
+#   load_balancer.onnx
+#   scaler.json
+#   inference_features.json

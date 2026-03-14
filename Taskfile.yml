@@ -1,214 +1,202 @@
-version: '3'
-env:
-  POWERSHELL_TELEMETRY_OPTOUT: 1
-  PWSH_TELEMETRY_OPTOUT: 1
+# File: Taskfile.yml
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  IMAGE_TAG:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  BUILD_TIME:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+
 tasks:
-  # 🔹 CORE SYSTEM ──────────────────────────────────────────────────
 
-  start-all:
-    desc: "Start entire system (with proper cleanup)"
+  # ── Setup ────────────────────────────────────────────────────────────────────
+  setup:
+    desc: "First-time project setup"
     cmds:
-      - powershell -Command "New-Item -ItemType Directory -Path logs -Force"
-      - task: kill-servers
-      - task: build-servers
-      - task: build
-      - task: run-servers
-      - task: run
+      - cp -n .env.example .env || true
+      - pip install pre-commit
+      - pre-commit install --install-hooks
+      - go mod download
+      - pip install -r ml/training/requirements.txt
+      - mkdir -p ml/models logs bin
+      - echo "Setup complete. Edit .env before running 'task up'."
 
-  start-ml-all:
-      desc: "Start entire system"
-      cmds:
-        - task: kill-ports
-        - powershell -Command "New-Item -ItemType Directory -Path logs,bin -Force"
-        - task: build-servers
-        - task: start-servers
-        - task: build  # Build balancer FIRST
-        - task: run    # Start balancer BEFORE port check
-        - task: wait-for-ports
-
-  kill-servers:
-    desc: "Force kill all backend servers (PowerShell)"
+  # ── Local dev stack ───────────────────────────────────────────────────────────
+  up:
+    desc: "Start the full stack (builds images if needed)"
     cmds:
-      - powershell -Command "try { Get-Process server5000,server5001,server5002 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}; Write-Output 'Servers killed' | Tee-Object -FilePath logs/balancer.log -Append"
+      - docker compose up -d --build
+      - echo "Stack started. Grafana → http://localhost:3000 (admin / $GRAFANA_ADMIN_PASSWORD)"
 
-  run-servers:
-    desc: "Run servers with port checking"
+  down:
+    desc: "Stop all containers"
     cmds:
-      - powershell -Command "Start-Process -NoNewWindow powershell -ArgumentList '-Command','.\bin\server5000.exe 2>&1 | Tee-Object -Append -FilePath logs/server5000.log'"
-      - powershell -Command "Start-Process -NoNewWindow powershell -ArgumentList '-Command','.\bin\server5001.exe 2>&1 | Tee-Object -Append -FilePath logs/server5001.log'"
-      - powershell -Command "Start-Process -NoNewWindow powershell -ArgumentList '-Command','.\bin\server5002.exe 2>&1 | Tee-Object -Append -FilePath logs/server5002.log'"
-      - timeout /t 5
+      - docker compose down
 
-  build-servers:
-    desc: "Build servers with port validation"
+  down-v:
+    desc: "Stop all containers and delete volumes (data loss!)"
     cmds:
-      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5000).TcpTestSucceeded) { Write-Error 'Port 5000 in use!'; exit 1 } else { Write-Output 'Port 5000 available' | Tee-Object -FilePath logs/balancer.log -Append }"
-      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5001).TcpTestSucceeded) { Write-Error 'Port 5001 in use!'; exit 1 } else { Write-Output 'Port 5001 available' | Tee-Object -FilePath logs/balancer.log -Append }"
-      - powershell -Command "if ((Test-NetConnection -ComputerName localhost -Port 5002).TcpTestSucceeded) { Write-Error 'Port 5002 in use!'; exit 1 } else { Write-Output 'Port 5002 available' | Tee-Object -FilePath logs/balancer.log -Append }"
-      - powershell -Command "go build -o bin/server5000.exe backend/cmd/server5000/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
-      - powershell -Command "go build -o bin/server5001.exe backend/cmd/server5001/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
-      - powershell -Command "go build -o bin/server5002.exe backend/cmd/server5002/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
+      - docker compose down -v
 
-  start-servers:
-      desc: "Start backend servers"
-      cmds:
-        - powershell -Command "Start-Process powershell -ArgumentList '-Command', 'go run backend/cmd/server5000/main.go'"
-        - powershell -Command "Start-Process powershell -ArgumentList '-Command', 'go run backend/cmd/server5001/main.go'"
-        - powershell -Command "Start-Process powershell -ArgumentList '-Command', 'go run backend/cmd/server5002/main.go'"
-        - timeout /t 5
+  logs:
+    desc: "Stream logs for all services"
+    cmds:
+      - docker compose logs -f
 
-  # 🔹 LOAD BALANCER ────────────────────────────────────────────────
+  logs-lb:
+    desc: "Stream load-balancer logs only"
+    cmds:
+      - docker compose logs -f load-balancer
+
+  ps:
+    desc: "Show container statuses"
+    cmds:
+      - docker compose ps
+
+  restart:
+    desc: "Restart the load-balancer container"
+    cmds:
+      - docker compose restart load-balancer
+
+  # ── Build ────────────────────────────────────────────────────────────────────
   build:
-    desc: "Build Load Balancer"
+    desc: "Build all Go binaries"
     cmds:
-      - powershell -Command "go build -o bin/neura-balancer backend/cmd/api/main.go 2>&1 | Tee-Object -FilePath logs/balancer.log -Append"
+      - task: build-balancer
+      - task: build-backend
 
-  run:
-    desc: "Run Load Balancer"
+  build-balancer:
+    desc: "Build the load-balancer binary"
     cmds:
-      - powershell -Command "go run backend/cmd/api/main.go 2>&1 | Tee-Object -FilePath logs/balancer-run.log -Append"
+      - |
+        CGO_ENABLED=0 go build \
+          -ldflags="-w -s -X main.buildVersion={{.IMAGE_TAG}} -X main.buildTime={{.BUILD_TIME}}" \
+          -trimpath \
+          -o bin/neurabalancer \
+          ./backend/cmd/api
 
-
-  # 🔹 DOCKER ─────────────────────────────────────────────────────────
-  docker-build:
-    desc: "Build Docker image for Load Balancer"
+  build-backend:
+    desc: "Build the backend server binary"
     cmds:
-      - docker build -t neura-balancer -f Dockerfile .
+      - |
+        CGO_ENABLED=0 go build \
+          -ldflags="-w -s" \
+          -trimpath \
+          -o bin/backend-server \
+          ./backend/cmd/server
 
-  docker-run:
-    desc: "Run Docker container"
+  # ── Testing ───────────────────────────────────────────────────────────────────
+  test:
+    desc: "Run all Go tests with race detector"
     cmds:
-      - docker run -p 8080:8080 --env-file .env neura-balancer
+      - go test -v -race -count=1 ./...
 
-  docker-clean:
-    desc: "Stop & remove Docker container"
+  test-coverage:
+    desc: "Run tests and open coverage report"
     cmds:
-      - docker stop $(docker ps -q --filter ancestor=neura-balancer) || true
-      - docker rm $(docker ps -aq --filter ancestor=neura-balancer) || true
+      - go test -race -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out
 
-  docker-push:
-    desc: "Push Docker Image to Registry"
+  test-python:
+    desc: "Run Python tests"
     cmds:
-      - docker tag neura-balancer your-dockerhub-username/neura-balancer:latest
-      - docker push your-dockerhub-username/neura-balancer:latest
+      - pytest ml/training/tests/ -v
 
-  # 🔹 KUBERNETES ──────────────────────────────────────────────────────
-  k8s-deploy:
-    desc: "Deploy Kubernetes manifests"
+  # ── Lint ─────────────────────────────────────────────────────────────────────
+  lint:
+    desc: "Run golangci-lint"
     cmds:
-      - kubectl apply -f deployments/k8s/
+      - golangci-lint run ./...
 
-  k8s-delete:
-    desc: "Delete Kubernetes deployment"
+  lint-fix:
+    desc: "Run golangci-lint with auto-fix"
     cmds:
-      - kubectl delete -f deployments/k8s/
+      - golangci-lint run --fix ./...
 
-  k8s-status:
-    desc: "Check Kubernetes pod status"
+  fmt:
+    desc: "Format Go and Python code"
     cmds:
-      - kubectl get pods -o wide
+      - gofmt -w .
+      - black ml/
 
-  k8s-logs:
-    desc: "Show logs of backend pod"
-    cmds:
-      - kubectl logs -l app=backend --tail=100 -f
-
-  k8s-restart:
-    desc: "Restart Kubernetes deployment"
-    cmds:
-      - kubectl rollout restart deployment backend
-
-  # 🔹 HELM ────────────────────────────────────────────────────────────
-  helm-deploy:
-    desc: "Deploy using Helm"
-    cmds:
-      - helm install neura-balancer deployments/helm/
-
-  helm-upgrade:
-    desc: "Upgrade Helm deployment"
-    cmds:
-      - helm upgrade neura-balancer deployments/helm/
-
-  helm-delete:
-    desc: "Uninstall Helm release"
-    cmds:
-      - helm uninstall neura-balancer
-
-  # 🔹 DATABASE ────────────────────────────────────────────────────────
+  # ── Database ─────────────────────────────────────────────────────────────────
   db-migrate:
-    desc: "Run database migrations"
+    desc: "Run database migrations against the running postgres container"
     cmds:
-      - docker run --rm -v $(pwd)/migrations:/migrations migrate/migrate -path=/migrations -database 'postgres://admin:admin@localhost:5432/metrics_db?sslmode=disable' up
+      - |
+        docker run --rm \
+          --network neurabalancer_neurabalancer-net \
+          -v $(pwd)/backend/migrations:/migrations \
+          migrate/migrate \
+          -path=/migrations \
+          -database "postgres://${DB_USER}:${DB_PASSWORD}@postgres:${DB_PORT:-5432}/${DB_NAME}?sslmode=${DB_SSLMODE:-disable}" \
+          up
+
+  db-rollback:
+    desc: "Roll back the last database migration"
+    cmds:
+      - |
+        docker run --rm \
+          --network neurabalancer_neurabalancer-net \
+          -v $(pwd)/backend/migrations:/migrations \
+          migrate/migrate \
+          -path=/migrations \
+          -database "postgres://${DB_USER}:${DB_PASSWORD}@postgres:${DB_PORT:-5432}/${DB_NAME}?sslmode=${DB_SSLMODE:-disable}" \
+          down 1
 
   db-reset:
-    desc: "Reset database (delete & recreate tables)"
+    desc: "Drop and recreate all tables (WARNING: destroys data)"
     cmds:
-      - docker exec -it db psql -U admin -d metrics_db -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+      - task: db-rollback
+      - task: db-migrate
 
-  # 🔹 MACHINE LEARNING ────────────────────────────────────────────────
-  ml-train-local:
-    desc: "Train model locally"
+  db-psql:
+    desc: "Open a psql shell in the running postgres container"
     cmds:
-      - task: ml-prepare-dirs
-      - python ml/training/train_model.py
+      - docker compose exec postgres psql -U ${DB_USER} -d ${DB_NAME}
 
-  ml-prepare-dirs:
-    desc: "Create required ML directories"
+  # ── ML ───────────────────────────────────────────────────────────────────────
+  ml-train:
+    desc: "Train the ML model (requires running DB with data)"
     cmds:
-      - powershell -Command "New-Item -ItemType Directory -Force -Path ml/models"
+      - cd ml/training && python train_model.py
 
-  ml-serve-local:
-    desc: "Run ML model server locally"
+  ml-serve:
+    desc: "Start the ML model server locally (outside Docker)"
     cmds:
-      - go run ml/model-server/main.go ml/model-server/router.go
+      - |
+        ML_SERVICE_PORT=${ML_SERVICE_PORT:-8081} \
+        MODEL_PATH=ml/models/load_balancer.onnx \
+        SCALER_PATH=ml/models/scaler.json \
+        go run ./ml/model-server/
 
-  run-balancer-ml:
-    desc: "Run load balancer with ML strategy"
+  # ── Docker helpers ────────────────────────────────────────────────────────────
+  docker-build-all:
+    desc: "Build all Docker images with the current git tag"
     cmds:
-      - powershell -Command "$env:LB_STRATEGY='ml'; $env:ML_MODEL_ENDPOINT='http://localhost:8081'; go run backend/cmd/api/main.go 2>&1 | Tee-Object -FilePath logs/balancer-ml.log -Append"
-  
-  
-  test-ml-flow:
-    desc: "Test full ML integration"
-    cmds:
-      - task: kill-ports
-      - task: start-servers
-      - timeout /t 5
-      - task: ml-serve-local
-      - timeout /t 2
-      - task: run-balancer-ml
-      - timeout /t 5
-      - powershell -Command "curl.exe http://localhost:8081/health"
-      - powershell -Command "hey -n 100 -c 10 http://localhost:8080/request"
-      - powershell -Command "curl.exe http://localhost:8080/metrics | Select-String 'ml_'"
+      - docker compose build --build-arg BUILD_VERSION={{.IMAGE_TAG}}
 
-  # 🔹 CI/CD (GitHub Actions) ─────────────────────────────────────────
-  ci:
-    desc: "Run CI pipeline (Lint, Test, Build)"
+  docker-push:
+    desc: "Push images to the configured registry (set REGISTRY env var)"
     cmds:
-      - task: lint
-      - task: test
-      - task: build
+      - docker compose push
 
-  cd:
-    desc: "Trigger GitHub Actions CD pipeline"
+  # ── Load testing ─────────────────────────────────────────────────────────────
+  load-test:
+    desc: "Run 1000 requests at 50 concurrent (requires 'hey' tool)"
     cmds:
-      - gh workflow run cd.yml -R your-repo/ai-load-balancer
+      - hey -n 1000 -c 50 -m POST http://localhost:${APP_PORT:-8080}/api/v1/request
 
-  # 🔹 CLEANUP ────────────────────────────────────────────────────────
+  # ── Cleanup ───────────────────────────────────────────────────────────────────
   clean:
-    desc: "Remove built binaries & artifacts"
+    desc: "Remove build artefacts"
     cmds:
-      - del /Q bin\*.exe
-      - rmdir /S /Q tmp
+      - rm -rf bin/ coverage.out
 
-  kill-ports:
-    desc: "Kill processes using required ports"
+  clean-all:
+    desc: "Remove build artefacts, Docker images, and volumes"
     cmds:
-      - powershell -File ./scripts/kill-ports.ps1
-      - powershell -Command "Write-Output \"[$(Get-Date)] Ports 8080,8081,5000-5002 clearing attempt completed\" | Tee-Object -FilePath logs/cleanup.log -Append"
-
-  wait-for-ports:
-      desc: "Verify critical ports are responsive"
-      cmds:
-        - powershell -ExecutionPolicy Bypass -File ./scripts/wait-for-ports.ps1 -Ports 5000,8081 -MaxAttempts 10 -RetryInterval 2
+      - task: clean
+      - docker compose down -v --rmi local

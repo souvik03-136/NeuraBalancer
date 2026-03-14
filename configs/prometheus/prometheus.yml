@@ -1,0 +1,61 @@
+# File: configs/prometheus/prometheus.yml
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  scrape_timeout:      10s
+  external_labels:
+    cluster: neurabalancer
+    environment: ${APP_ENV:-development}
+
+# Alerting rules (extend as needed)
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+
+  # ── Load Balancer ──────────────────────────────────────────────────────────
+  - job_name: load-balancer
+    static_configs:
+      - targets: ["load-balancer:8080"]
+        labels:
+          service: load-balancer
+    metrics_path: /metrics
+
+  # ── Backend Servers ────────────────────────────────────────────────────────
+  # Each backend exposes JSON metrics at /metrics; Prometheus scrapes them
+  # via the load-balancer network.  Add more targets as backends scale.
+  - job_name: backend-servers
+    static_configs:
+      - targets:
+          - "backend-1:8001"
+          - "backend-2:8002"
+          - "backend-3:8003"
+        labels:
+          service: backend
+    metrics_path: /metrics
+
+  # ── ML Service ────────────────────────────────────────────────────────────
+  # The ML service does not expose Prometheus natively; metrics are relayed
+  # through the load-balancer collector.  Uncomment if you add a /metrics
+  # endpoint to the ML server.
+  # - job_name: ml-service
+  #   static_configs:
+  #     - targets: ["ml-service:8081"]
+
+  # ── PostgreSQL exporter ────────────────────────────────────────────────────
+  # Uncomment and add postgres-exporter service to docker-compose.yml.
+  # - job_name: postgres
+  #   static_configs:
+  #     - targets: ["postgres-exporter:9187"]
+
+  # ── OTel Collector self-metrics ───────────────────────────────────────────
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+        labels:
+          service: otel-collector
+
+  # ── Prometheus self-monitoring ────────────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

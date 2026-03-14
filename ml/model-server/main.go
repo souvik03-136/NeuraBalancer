@@ -1,8 +1,11 @@
+// File: ml/model-server/main.go
 package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,225 +13,321 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
-	"github.com/yalue/onnxruntime_go"
+	ort "github.com/yalue/onnxruntime_go"
 )
 
-var (
-	session   *onnxruntime_go.DynamicAdvancedSession
-	scaler    Scaler
-	modelLock sync.RWMutex
-)
+// ─── Config ───────────────────────────────────────────────────────────────────
 
-const (
-	expectedFeatureCount = 6
-	modelPath            = "ml/models/load_balancer.onnx"
-	scalerPath           = "ml/models/scaler.json"
-)
+type serverConfig struct {
+	Port            string
+	ModelPath       string
+	ScalerPath      string
+	OnnxLibPath     string
+	ShutdownTimeout time.Duration
+}
 
-type Scaler struct {
+func loadConfig() serverConfig {
+	_ = godotenv.Load()
+	return serverConfig{
+		Port:            getEnv("ML_SERVICE_PORT", "8081"),
+		ModelPath:       getEnv("MODEL_PATH", "ml/models/load_balancer.onnx"),
+		ScalerPath:      getEnv("SCALER_PATH", "ml/models/scaler.json"),
+		OnnxLibPath:     getEnv("ONNX_LIB_PATH", onnxLibDefault()),
+		ShutdownTimeout: time.Duration(getEnvInt("SHUTDOWN_TIMEOUT_SECONDS", 10)) * time.Second,
+	}
+}
+
+func onnxLibDefault() string {
+	if runtime.GOOS == "windows" {
+		return getEnv("ONNX_LIB_PATH_WIN", "onnxruntime.dll")
+	}
+	return "libonnxruntime.so"
+}
+
+// ─── Scaler ───────────────────────────────────────────────────────────────────
+
+const expectedFeatures = 6
+
+type scaler struct {
 	Mean  []float32 `json:"mean"`
 	Scale []float32 `json:"scale"`
 }
 
-type PredictionResponse struct {
-	Scores []float32 `json:"scores"`
-}
-
-func validateFiles() error {
-	// Validate model file
-	if _, err := os.Stat(modelPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("model file missing: %s", modelPath)
-		}
-		return fmt.Errorf("error checking model file: %w", err)
+func (sc *scaler) validate() error {
+	if len(sc.Mean) != expectedFeatures {
+		return fmt.Errorf("scaler mean length %d != expected %d", len(sc.Mean), expectedFeatures)
 	}
-
-	// Validate scaler file
-	if _, err := os.Stat(scalerPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("scaler file missing: %s", scalerPath)
-		}
-		return fmt.Errorf("error checking scaler file: %w", err)
+	if len(sc.Scale) != expectedFeatures {
+		return fmt.Errorf("scaler scale length %d != expected %d", len(sc.Scale), expectedFeatures)
 	}
-
 	return nil
 }
 
-func loadScaler() error {
-	data, err := os.ReadFile(scalerPath)
-	if err != nil {
-		return fmt.Errorf("scaler file error: %w", err)
-	}
-
-	if err := json.Unmarshal(data, &scaler); err != nil {
-		return fmt.Errorf("scaler JSON parsing error: %w", err)
-	}
-
-	// Validate scaler content
-	if len(scaler.Mean) == 0 || len(scaler.Scale) == 0 {
-		return fmt.Errorf("invalid scaler data: empty mean or scale arrays")
-	}
-
-	if len(scaler.Mean) != expectedFeatureCount || len(scaler.Scale) != expectedFeatureCount {
-		return fmt.Errorf("invalid scaler dimensions: expected %d features, got mean:%d scale:%d",
-			expectedFeatureCount, len(scaler.Mean), len(scaler.Scale))
-	}
-
-	return nil
-}
-
-func normalize(features []float32) []float32 {
+func (sc *scaler) normalize(features []float32) []float32 {
 	out := make([]float32, len(features))
-	for i := range features {
-		if i < len(scaler.Mean) && i < len(scaler.Scale) {
-			out[i] = (features[i] - scaler.Mean[i]) / scaler.Scale[i]
+	for i, f := range features {
+		if sc.Scale[i] == 0 {
+			out[i] = 0
+			continue
 		}
+		out[i] = (f - sc.Mean[i]) / sc.Scale[i]
 	}
 	return out
 }
 
-func predict(normalized []float32) (float32, error) {
-	modelLock.RLock()
-	defer modelLock.RUnlock()
+// ─── Model Server ─────────────────────────────────────────────────────────────
 
-	inShape := onnxruntime_go.NewShape(1, int64(len(normalized)))
-	inTensor, err := onnxruntime_go.NewTensor[float32](inShape, normalized)
+type modelServer struct {
+	cfg     serverConfig
+	sc      scaler
+	session *ort.DynamicAdvancedSession
+	mu      sync.RWMutex
+}
+
+func newModelServer(cfg serverConfig) (*modelServer, error) {
+	ms := &modelServer{cfg: cfg}
+
+	// Validate files exist
+	for _, path := range []string{cfg.ModelPath, cfg.ScalerPath} {
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("required file missing %q: %w", path, err)
+		}
+	}
+
+	// Load scaler
+	raw, err := os.ReadFile(cfg.ScalerPath)
 	if err != nil {
-		return 0, fmt.Errorf("tensor creation failed: %w", err)
+		return nil, fmt.Errorf("read scaler: %w", err)
+	}
+	if err := json.Unmarshal(raw, &ms.sc); err != nil {
+		return nil, fmt.Errorf("parse scaler: %w", err)
+	}
+	if err := ms.sc.validate(); err != nil {
+		return nil, fmt.Errorf("invalid scaler: %w", err)
+	}
+
+	// Init ONNX runtime
+	ort.SetSharedLibraryPath(cfg.OnnxLibPath)
+	if err := ort.InitializeEnvironment(); err != nil {
+		return nil, fmt.Errorf("onnx init: %w", err)
+	}
+
+	opts, err := ort.NewSessionOptions()
+	if err != nil {
+		return nil, fmt.Errorf("session options: %w", err)
+	}
+	defer opts.Destroy()
+
+	// FIX: input/output names now match what PyTorch onnx.export produces.
+	// Training code exports with input_names=['features'], output_names=['predicted_score'].
+	// If you retrain with TF, set MODEL_INPUT_NAME / MODEL_OUTPUT_NAME env vars.
+	inputName  := getEnv("MODEL_INPUT_NAME",  "features")
+	outputName := getEnv("MODEL_OUTPUT_NAME", "predicted_score")
+
+	ms.session, err = ort.NewDynamicAdvancedSession(
+		cfg.ModelPath,
+		[]string{inputName},
+		[]string{outputName},
+		opts,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load model: %w", err)
+	}
+
+	log.Printf("model server ready — model=%s input=%s output=%s",
+		cfg.ModelPath, inputName, outputName)
+	return ms, nil
+}
+
+func (ms *modelServer) predict(features []float32) (float32, error) {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+
+	norm := ms.sc.normalize(features)
+	shape := ort.NewShape(1, int64(len(norm)))
+
+	inTensor, err := ort.NewTensor[float32](shape, norm)
+	if err != nil {
+		return 0, fmt.Errorf("input tensor: %w", err)
 	}
 	defer inTensor.Destroy()
 
-	outShape := onnxruntime_go.NewShape(1, 1)
-	outTensor, err := onnxruntime_go.NewEmptyTensor[float32](outShape)
+	outShape := ort.NewShape(1, 1)
+	outTensor, err := ort.NewEmptyTensor[float32](outShape)
 	if err != nil {
-		return 0, fmt.Errorf("output tensor alloc failed: %w", err)
+		return 0, fmt.Errorf("output tensor: %w", err)
 	}
 	defer outTensor.Destroy()
 
-	inputs := []onnxruntime_go.ArbitraryTensor{inTensor}
-	outputs := []onnxruntime_go.ArbitraryTensor{outTensor}
-
-	if err := session.Run(inputs, outputs); err != nil {
-		return 0, fmt.Errorf("inference failed: %w", err)
+	if err := ms.session.Run(
+		[]ort.ArbitraryTensor{inTensor},
+		[]ort.ArbitraryTensor{outTensor},
+	); err != nil {
+		return 0, fmt.Errorf("inference: %w", err)
 	}
 
-	return outTensor.GetData()[0], nil
+	data := outTensor.GetData()
+	if len(data) == 0 {
+		return 0, errors.New("empty inference output")
+	}
+	return data[0], nil
 }
 
-func predictHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Servers []struct {
-			CPU         float32 `json:"cpu_usage"`
-			Memory      float32 `json:"memory_usage"`
-			Connections int     `json:"active_conns"`
-			ErrorRate   float32 `json:"error_rate"`
-			ResponseP95 float32 `json:"response_p95"`
-			Capacity    int     `json:"capacity"`
-		} `json:"servers"`
-	}
+// ─── HTTP handlers ────────────────────────────────────────────────────────────
 
-	body, err := io.ReadAll(r.Body)
+type predictRequest struct {
+	Servers []struct {
+		ServerID    int     `json:"server_id"`
+		CPUUsage    float32 `json:"cpu_usage"`
+		MemoryUsage float32 `json:"memory_usage"`
+		ActiveConns int     `json:"active_conns"`
+		ErrorRate   float32 `json:"error_rate"`
+		ResponseP95 float32 `json:"response_p95"`
+		Weight      int     `json:"weight"`
+		Capacity    int     `json:"capacity"`
+	} `json:"servers"`
+}
+
+// FIX: response field is now "predictions" to match what the Go strategy expects.
+type predictResponse struct {
+	Predictions []float32 `json:"predictions"`
+}
+
+func (ms *modelServer) handlePredict(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB limit
 	if err != nil {
-		http.Error(w, "Unable to read request body", http.StatusBadRequest)
+		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewBuffer(body))
+	r.Body = io.NopCloser(bytes.NewReader(body))
 
+	var req predictRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-
-	// Validate request content
 	if len(req.Servers) == 0 {
-		http.Error(w, "No servers provided in request", http.StatusBadRequest)
+		http.Error(w, "servers list is empty", http.StatusBadRequest)
 		return
 	}
 
 	scores := make([]float32, len(req.Servers))
 	for i, srv := range req.Servers {
 		feats := []float32{
-			srv.CPU,
-			srv.Memory,
-			float32(srv.Connections),
+			srv.CPUUsage,
+			srv.MemoryUsage,
+			float32(srv.ActiveConns),
 			srv.ErrorRate,
 			srv.ResponseP95,
 			float32(srv.Capacity),
 		}
-		if len(feats) != expectedFeatureCount {
-			http.Error(w,
-				fmt.Sprintf("Invalid feature count: expected %d got %d", expectedFeatureCount, len(feats)),
-				http.StatusBadRequest,
-			)
+		if len(feats) != expectedFeatures {
+			http.Error(w, fmt.Sprintf("server %d: wrong feature count", i), http.StatusBadRequest)
 			return
 		}
-		norm := normalize(feats)
-		score, err := predict(norm)
+		score, err := ms.predict(feats)
 		if err != nil {
-			log.Printf("Prediction error: %v", err)
-			http.Error(w, "Prediction failed", http.StatusInternalServerError)
+			log.Printf("prediction error for server %d: %v", srv.ServerID, err)
+			http.Error(w, "prediction failed", http.StatusInternalServerError)
 			return
 		}
 		scores[i] = score
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(PredictionResponse{Scores: scores})
+	_ = json.NewEncoder(w).Encode(predictResponse{Predictions: scores})
 }
 
-func healthCheck(w http.ResponseWriter, r *http.Request) {
+func (ms *modelServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "OK")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
+
+func (ms *modelServer) handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"model_version": getEnv("MODEL_VERSION", "1.0.0"),
+		"onnx_version":  "1.16.3",
+	})
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	_ = godotenv.Load()
+	cfg := loadConfig()
 
-	// Validate required files before initialization
-	if err := validateFiles(); err != nil {
-		log.Fatalf("File validation error: %v", err)
-	}
-
-	if runtime.GOOS == "windows" {
-		onnxruntime_go.SetSharedLibraryPath("C:/Users/souvi/OneDrive/Documents/GoLang/NeuraBalancer/onnxruntime-win-x64-1.21.0/lib/onnxruntime.dll")
-	} else {
-		onnxruntime_go.SetSharedLibraryPath("libonnxruntime.so.1.16.3")
-	}
-
-	if err := onnxruntime_go.InitializeEnvironment(); err != nil {
-		log.Fatalf("ORT init failed: %v", err)
-	}
-	defer onnxruntime_go.DestroyEnvironment()
-
-	if err := loadScaler(); err != nil {
-		log.Fatalf("Scaler load failed: %v", err)
-	}
-
-	opts, err := onnxruntime_go.NewSessionOptions()
+	ms, err := newModelServer(cfg)
 	if err != nil {
-		log.Fatalf("SessionOptions creation failed: %v", err)
+		log.Fatalf("model server init failed: %v", err)
 	}
-	defer opts.Destroy()
+	defer func() {
+		if ms.session != nil {
+			ms.session.Destroy()
+		}
+		ort.DestroyEnvironment()
+	}()
 
-	// Verify actual input/output names using Netron
-	session, err = onnxruntime_go.NewDynamicAdvancedSession(
-		modelPath,
-		[]string{"serving_default_input:0"},   // Actual input name
-		[]string{"StatefulPartitionedCall:0"}, // Actual output name
-		opts,
-	)
-	if err != nil {
-		log.Fatalf("Model load failed: %v", err)
-	}
-	defer session.Destroy()
+	r := mux.NewRouter()
+	r.HandleFunc("/health",  ms.handleHealth).Methods(http.MethodGet)
+	r.HandleFunc("/version", ms.handleVersion).Methods(http.MethodGet)
+	r.HandleFunc("/predict", ms.handlePredict).Methods(http.MethodPost)
 
-	router := NewRouter()
-	port := os.Getenv("ML_SERVICE_PORT")
-	if port == "" {
-		port = "8081"
+	srv := &http.Server{
+		Addr:         ":" + cfg.Port,
+		Handler:      r,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  30 * time.Second,
 	}
-	log.Printf("ML Service running on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, router))
+
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Printf("ML model server listening on :%s", cfg.Port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case sig := <-quit:
+		log.Printf("signal %s received, shutting down", sig)
+	case err := <-serverErr:
+		log.Fatalf("server error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("shutdown error: %v", err)
+	}
+	log.Println("ML model server stopped")
+}
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	v := getEnv(key, "")
+	if v == "" {
+		return fallback
+	}
+	var n int
+	if _, err := fmt.Sscan(v, &n); err != nil {
+		return fallback
+	}
+	return n
 }

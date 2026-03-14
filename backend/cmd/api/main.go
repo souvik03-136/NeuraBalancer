@@ -1,181 +1,127 @@
+// File: backend/cmd/api/main.go
 package main
 
 import (
 	"context"
-	"fmt"
-	"log"
-	"math/rand"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/souvik03-136/neurabalancer/backend/database"
+	"go.uber.org/zap"
+
 	"github.com/souvik03-136/neurabalancer/backend/internal/api"
+	"github.com/souvik03-136/neurabalancer/backend/internal/config"
+	"github.com/souvik03-136/neurabalancer/backend/internal/database"
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
 	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
+	"github.com/souvik03-136/neurabalancer/backend/internal/tracer"
 )
 
 func main() {
-	// Initialize Database
-	if err := database.InitDB(); err != nil {
-		log.Fatalf("Database initialization failed: %v", err)
-	}
-	defer database.CloseDB()
-
-	// Seed the random number generator
-	rand.Seed(time.Now().UnixNano())
-
-	// Load server list from ENV or fallback
-	serverListEnv := os.Getenv("SERVERS")
-	var serverList []string
-	if serverListEnv == "" {
-		log.Println("No SERVERS environment variable found. Using default servers.")
-		serverList = []string{"http://localhost:5000", "http://localhost:5001", "http://localhost:5002"}
-	} else {
-		serverList = strings.Split(serverListEnv, ",")
+	// ── Config ────────────────────────────────────────────────────────────────
+	cfg, err := config.Load()
+	if err != nil {
+		// logger not ready yet, use stderr
+		_, _ = os.Stderr.WriteString("FATAL config error: " + err.Error() + "\n")
+		os.Exit(1)
 	}
 
-	// Register servers in database
-	for _, server := range serverList {
-		err := database.RegisterServer(server)
+	// ── Logger ────────────────────────────────────────────────────────────────
+	logger, err := config.NewLogger(cfg.App.LogLevel, cfg.App.LogFormat)
+	if err != nil {
+		_, _ = os.Stderr.WriteString("FATAL logger init: " + err.Error() + "\n")
+		os.Exit(1)
+	}
+	defer logger.Sync() //nolint:errcheck
+
+	logger.Info("starting neurabalancer",
+		zap.String("env", cfg.App.Env),
+		zap.String("strategy", cfg.LB.Strategy),
+		zap.Strings("servers", cfg.LB.Servers),
+	)
+
+	// ── Tracing ───────────────────────────────────────────────────────────────
+	var tp *tracer.Provider
+	if cfg.Telemetry.OTELEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tp, err = tracer.Init(ctx, cfg.Telemetry.ServiceName, cfg.Telemetry.OTLPEndpoint)
 		if err != nil {
-			log.Printf("Failed to register server %s in DB: %v", server, err)
+			logger.Warn("tracing init failed, continuing without traces", zap.Error(err))
+			tp = tracer.NoopProvider()
 		} else {
-			log.Printf("Server %s registered in DB", server)
+			logger.Info("tracing initialised", zap.String("endpoint", cfg.Telemetry.OTLPEndpoint))
 		}
+	} else {
+		tp = tracer.NoopProvider()
 	}
-
-	// Wait for servers to start
-	time.Sleep(2 * time.Second)
-
-	log.Println("Available Servers:", serverList)
-
-	// Check server health
-	for _, server := range serverList {
-		if isServerUp(server) {
-			log.Printf("Server %s is UP!", server)
-		} else {
-			log.Printf("Server %s is DOWN!", server)
-		}
-	}
-
-	// Load ML model endpoint
-	mlEndpoint := os.Getenv("ML_MODEL_ENDPOINT")
-	if mlEndpoint == "" {
-		mlEndpoint = "http://ml-service:8000"
-	}
-
-	// Initialize Metrics Collector
-	collector := metrics.NewCollector()
-
-	// Define load balancing strategies
-	roundRobin := &loadbalancer.RoundRobinStrategy{}
-	leastConnections := &loadbalancer.LeastConnectionsStrategy{}
-	weightedRoundRobin := &loadbalancer.WeightedRoundRobinStrategy{}
-	randomSelection := &loadbalancer.RandomSelectionStrategy{}
-	mlStrategy := loadbalancer.NewMLStrategy(mlEndpoint, collector)
-
-	// Select strategy from ENV
-	var strategy loadbalancer.Strategy
-	strategyEnv := strings.ToLower(os.Getenv("LB_STRATEGY"))
-
-	switch strategyEnv {
-	case "ml":
-		strategy = mlStrategy
-		log.Println("Using AI-Driven ML Strategy")
-	case "least_connections":
-		strategy = leastConnections
-	case "weighted_round_robin":
-		strategy = weightedRoundRobin
-	case "random":
-		strategy = randomSelection
-	case "round_robin":
-		strategy = roundRobin
-	default:
-		log.Println("No valid strategy found. Defaulting to Least Connections.")
-		strategyEnv = "least_connections"
-		strategy = leastConnections
-	}
-
-	log.Println("Load Balancing Strategy:", strategyEnv)
-
-	// Echo setup
-	e := echo.New()
-	e.Use(middleware.Logger())
-	e.Use(middleware.Recover())
-	e.Use(middleware.CORS())
-
-	// Load Balancer with fallback server list
-	lb := loadbalancer.NewLoadBalancer(strategy, fallbackServerList(serverList))
-
-	// Register routes
-	api.RegisterRoutes(e, lb, collector)
-
-	// Prometheus metrics endpoint
-	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
-
-	// Load port from ENV or fallback
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	// Start server
-	go func() {
-		log.Println("Starting Load Balancer on port", port)
-		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Error starting server: %v", err)
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tp.Shutdown(shutCtx); err != nil {
+			logger.Warn("tracer shutdown error", zap.Error(err))
 		}
 	}()
 
-	// Graceful shutdown
+	// ── Database ──────────────────────────────────────────────────────────────
+	db, err := database.New(&cfg.Database, logger)
+	if err != nil {
+		logger.Fatal("database connection failed", zap.Error(err))
+	}
+	defer db.Close()
+
+	// ── Metrics Collector ─────────────────────────────────────────────────────
+	col := metrics.NewCollector(db, logger)
+
+	// ── Strategy ──────────────────────────────────────────────────────────────
+	strategy, err := loadbalancer.NewStrategy(cfg.LB.Strategy, &cfg.ML, col, logger)
+	if err != nil {
+		logger.Fatal("strategy init failed", zap.Error(err))
+	}
+
+	// ── Load Balancer ─────────────────────────────────────────────────────────
+	lb := loadbalancer.New(strategy, cfg.LB.Servers, &cfg.Health, db, col, logger)
+	defer lb.Stop()
+
+	// ── HTTP Server ───────────────────────────────────────────────────────────
+	router := api.NewRouter(lb, logger, cfg.Telemetry.ServiceName)
+	srv := &http.Server{
+		Addr:         cfg.Server.Addr(),
+		Handler:      router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Start server in background goroutine
+	serverErr := make(chan error, 1)
+	go func() {
+		logger.Info("http server listening", zap.String("addr", cfg.Server.Addr()))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	// ── Graceful Shutdown ─────────────────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server gracefully...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	select {
+	case sig := <-quit:
+		logger.Info("shutdown signal received", zap.String("signal", sig.String()))
+	case err := <-serverErr:
+		logger.Error("server error", zap.Error(err))
+	}
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := e.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	if err := srv.Shutdown(shutCtx); err != nil {
+		logger.Error("graceful shutdown failed", zap.Error(err))
+	} else {
+		logger.Info("server shutdown complete")
 	}
-
-	log.Println("Server exited cleanly")
-}
-
-// isServerUp checks if a server is reachable with retries
-func isServerUp(server string) bool {
-	client := http.Client{Timeout: 5 * time.Second}
-	maxRetries := 3
-
-	for i := 0; i < maxRetries; i++ {
-		resp, err := client.Get(fmt.Sprintf("%s/health", server))
-		if err == nil && resp.StatusCode == http.StatusOK {
-			return true
-		}
-		log.Printf("Retrying connection to %s (attempt %d/%d)", server, i+1, maxRetries)
-		time.Sleep(2 * time.Second)
-	}
-	return false
-}
-
-// fallbackServerList provides a fallback if DB queries fail
-func fallbackServerList(serverList []string) []string {
-	servers, err := database.GetAvailableServers()
-	if err != nil {
-		log.Printf("DB error, using in-memory list: %v", err)
-		return serverList
-	}
-	if len(servers) == 0 {
-		log.Println("No active servers in DB, falling back to original list")
-		return serverList
-	}
-	return servers
 }

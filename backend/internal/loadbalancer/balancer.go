@@ -1,283 +1,370 @@
+// File: backend/internal/loadbalancer/balancer.go
 package loadbalancer
 
 import (
-	"bytes"
+	"context"
 	"errors"
-	"io"
-	"log"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/souvik03-136/neurabalancer/backend/database"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+
+	"github.com/souvik03-136/neurabalancer/backend/internal/config"
+	"github.com/souvik03-136/neurabalancer/backend/internal/database"
 	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
+	"github.com/souvik03-136/neurabalancer/backend/internal/tracer"
 )
 
-// Server struct to track health status
+// Server represents a single backend server.
 type Server struct {
 	ID          int
 	URL         string
 	Alive       bool
 	Weight      int
-	Connections int // Track active connections
-	Capacity    int // Add capacity field
+	Capacity    int
+	Connections int // active in-flight requests
 	mu          sync.Mutex
 }
 
-// LoadBalancer struct
-type LoadBalancer struct {
-	servers  []*Server
-	mu       sync.Mutex
-	strategy Strategy
-	metrics  *metrics.Collector // Add a metrics collector
+// CanAcceptRequest returns true if the server is alive and has capacity headroom.
+func (s *Server) CanAcceptRequest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Alive && s.Connections < s.Capacity
 }
 
-// NewLoadBalancer initializes a load balancer with a given strategy
-func NewLoadBalancer(strategy Strategy, serverURLs []string) *LoadBalancer {
+func (s *Server) incrementConns() {
+	s.mu.Lock()
+	s.Connections++
+	s.mu.Unlock()
+}
+
+func (s *Server) decrementConns() {
+	s.mu.Lock()
+	if s.Connections > 0 {
+		s.Connections--
+	}
+	s.mu.Unlock()
+}
+
+// LoadBalancer routes requests to backend servers using a pluggable Strategy.
+type LoadBalancer struct {
+	servers  []*Server
+	mu       sync.RWMutex
+	strategy Strategy
+	cfg      *config.HealthConfig
+	db       *database.DB
+	col      *metrics.Collector
+	logger   *zap.Logger
+	stop     chan struct{}
+}
+
+// New creates a LoadBalancer, seeds the server list from config, and starts
+// background health checking and metrics polling.
+func New(
+	strategy Strategy,
+	serverURLs []string,
+	cfg *config.HealthConfig,
+	db *database.DB,
+	col *metrics.Collector,
+	logger *zap.Logger,
+) *LoadBalancer {
 	lb := &LoadBalancer{
 		strategy: strategy,
-		metrics:  metrics.NewCollector(),
+		cfg:      cfg,
+		db:       db,
+		col:      col,
+		logger:   logger,
+		stop:     make(chan struct{}),
 	}
 
-	for _, serverURL := range serverURLs {
-		serverID, err := database.GetServerID(serverURL)
+	ctx := context.Background()
+
+	for _, rawURL := range serverURLs {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
+			continue
+		}
+
+		// Upsert into DB so the server exists before we query it
+		if err := db.UpsertServer(ctx, rawURL); err != nil {
+			logger.Warn("failed to upsert server", zap.String("url", rawURL), zap.Error(err))
+		}
+
+		id, err := db.GetServerID(ctx, rawURL)
 		if err != nil {
-			log.Printf("Using temporary ID for %s: %v", serverURL, err)
-			serverID = -len(lb.servers) // Generate unique negative ID
+			logger.Warn("server ID lookup failed, using ephemeral ID",
+				zap.String("url", rawURL), zap.Error(err))
+			id = -(len(lb.servers) + 1)
 		}
 
-		capacity := 1 // Default capacity
-
-		if serverID > 0 {
-			capacity, err = database.GetServerCapacity(serverID)
-			if err != nil {
-				log.Printf("Using default capacity for %s: %v", serverURL, err)
+		capacity := 10
+		if id > 0 {
+			if cap, err := db.GetServerCapacity(ctx, id); err == nil {
+				capacity = cap
 			}
 		}
 
-		weight := 1 // Default weight
-		if serverID > 0 {
-			weight, err = database.GetServerWeight(serverID)
-			if err != nil {
-				log.Printf("Using default weight for %s: %v", serverURL, err)
+		weight := 1
+		if id > 0 {
+			if w, err := db.GetServerWeight(ctx, id); err == nil {
+				weight = w
 			}
 		}
-		server := &Server{
-			ID:       serverID,
-			URL:      serverURL,
+
+		lb.servers = append(lb.servers, &Server{
+			ID:       id,
+			URL:      rawURL,
+			Alive:    true, // optimistic; health check corrects quickly
 			Weight:   weight,
 			Capacity: capacity,
-		}
-		isActive, err := database.GetServerActiveStatus(serverID)
-		if err != nil {
-			log.Printf("Failed to get initial status for %s: %v", serverURL, err)
-			isActive = true // Default to active
-		}
-		server.Alive = isActive
-		lb.servers = append(lb.servers, server)
+		})
 	}
 
-	go lb.startHealthChecks()
+	go lb.runHealthChecks()
+	go lb.runMetricsPolling()
+
 	return lb
 }
 
-// GetServer selects a healthy server based on the strategy
-func (lb *LoadBalancer) GetServer() (*Server, error) {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
+// Stop signals background goroutines to exit. Call on shutdown.
+func (lb *LoadBalancer) Stop() {
+	close(lb.stop)
+}
 
-	// Filter healthy servers
-	var healthyServers []*Server
+// NextServer picks the best available server according to the active strategy.
+func (lb *LoadBalancer) NextServer(ctx context.Context) (*Server, error) {
+	lb.mu.RLock()
+	healthy := make([]*Server, 0, len(lb.servers))
 	for _, s := range lb.servers {
 		if s.Alive {
-			healthyServers = append(healthyServers, s)
+			healthy = append(healthy, s)
 		}
 	}
+	lb.mu.RUnlock()
 
-	if len(healthyServers) == 0 {
+	if len(healthy) == 0 {
 		return nil, errors.New("no healthy servers available")
 	}
 
-	selected := lb.strategy.SelectServer(healthyServers)
+	selected := lb.strategy.Select(healthy)
 	if selected == nil {
-		return nil, errors.New("strategy failed to select server")
+		return nil, errors.New("strategy returned nil server")
 	}
 
-	// Increment connection count
-	selected.mu.Lock()
-	selected.Connections++
-	selected.mu.Unlock()
-
+	selected.incrementConns()
+	lb.col.SetActiveConnections(selected.ID, selected.Connections)
 	return selected, nil
 }
 
-// checkServerHealth pings the server's /health endpoint
-const healthCheckRetries = 3
-
-func (s *Server) checkServerHealth() bool {
-	client := http.Client{Timeout: 3 * time.Second}
-
-	// Ensure URL has scheme
-	healthURL := s.URL + "/health"
-	if !strings.HasPrefix(healthURL, "http") {
-		healthURL = "http://" + healthURL
-	}
-
-	for i := 0; i < healthCheckRetries; i++ {
-		resp, err := client.Get(healthURL)
-		if err == nil {
-			defer resp.Body.Close()
-
-			if resp.StatusCode == http.StatusOK {
-				log.Printf("Server %s is UP\n", s.URL)
-				return true
-			}
-			log.Printf("Server %s returned %d (unhealthy)\n", s.URL, resp.StatusCode)
-		} else {
-			log.Printf("Server %s is DOWN: %v\n", s.URL, err)
-		}
-
-		// Retry after a short delay
-		if i < healthCheckRetries-1 {
-			time.Sleep(1 * time.Second)
-		}
-	}
-
-	return false
+// ReleaseServer decrements the connection counter for a server.
+func (lb *LoadBalancer) ReleaseServer(s *Server) {
+	s.decrementConns()
+	lb.col.SetActiveConnections(s.ID, s.Connections)
 }
 
-// startHealthChecks runs periodic health checks
-func (lb *LoadBalancer) startHealthChecks() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		lb.mu.Lock()
-		for _, s := range lb.servers {
-			wasAlive := s.Alive
-			isAlive := s.checkServerHealth()
-
-			// Only update DB when status changes
-			if wasAlive != isAlive {
-				err := database.UpdateServerStatus(s.ID, isAlive)
-				if err != nil {
-					log.Printf("Failed to update server status (ID %d): %v", s.ID, err)
-				} else {
-					log.Printf("Updated server %s status in DB: Alive=%v", s.URL, isAlive)
-				}
-			}
-
-			s.Alive = isAlive
-			if !wasAlive && isAlive {
-				s.mu.Lock()
-				s.Connections = 0
-				s.mu.Unlock()
-			}
-		}
-		lb.mu.Unlock()
-	}
+// Servers returns a snapshot of all servers (healthy and unhealthy).
+func (lb *LoadBalancer) Servers() []*Server {
+	lb.mu.RLock()
+	defer lb.mu.RUnlock()
+	snap := make([]*Server, len(lb.servers))
+	copy(snap, lb.servers)
+	return snap
 }
 
-// GetAllServers returns a list of all servers with their health status
-func (lb *LoadBalancer) GetAllServers() []*Server {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
+// ProxyRequest forwards an incoming request to a selected backend server.
+// It records duration, success, and tracing spans.
+func (lb *LoadBalancer) ProxyRequest(w http.ResponseWriter, r *http.Request) {
+	ctx, span := tracer.Tracer("loadbalancer").Start(r.Context(), "ProxyRequest")
+	defer span.End()
 
-	serversCopy := make([]*Server, len(lb.servers))
-	copy(serversCopy, lb.servers)
-	return serversCopy
-}
-
-// ForwardRequest sends the request to ALL healthy backend servers (broadcast)
-func (lb *LoadBalancer) ForwardRequest(w http.ResponseWriter, r *http.Request) {
-	startTime := time.Now()
-	var serverID int
-	var success bool
-
-	defer func() {
-		duration := time.Duration(time.Since(startTime).Milliseconds()) * time.Millisecond
-		lb.metrics.RecordRequest(serverID, success, duration)
-	}()
-
-	// Select server
-	server, err := lb.GetServer()
+	server, err := lb.NextServer(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		success = false
+		lb.logger.Warn("no server available", zap.Error(err))
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	serverID = server.ID
+	defer lb.ReleaseServer(server)
 
-	// Decrement connection count when done
-	defer func() {
-		server.mu.Lock()
-		server.Connections--
-		server.mu.Unlock()
-	}()
+	span.SetAttributes(
+		attribute.String("lb.server.url", server.URL),
+		attribute.Int("lb.server.id", server.ID),
+	)
 
-	// Clone request
-	bodyBytes, _ := io.ReadAll(r.Body)
-	defer r.Body.Close()
-
-	// Create new request
-	req, err := http.NewRequest(r.Method, server.URL+r.URL.Path, bytes.NewReader(bodyBytes))
+	start := time.Now()
+	targetURL := server.URL + r.URL.RequestURI()
+	proxyReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, r.Body)
 	if err != nil {
-		http.Error(w, "Error creating request", http.StatusInternalServerError)
-		success = false
+		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
-	req.Header = r.Header.Clone()
+	proxyReq.Header = r.Header.Clone()
+	// Propagate trace context downstream
+	tracer.Tracer("").(*trace.Span) // noop — otelecho middleware injects headers
 
-	// Record initial attempt before processing
-	if err := database.InsertAttempt(r.Context(), server.ID, false); err != nil {
-		log.Printf("Failed to log initial attempt: %v", err)
+	resp, err := http.DefaultClient.Do(proxyReq)
+	duration := time.Since(start)
+
+	success := err == nil && resp != nil && resp.StatusCode < 500
+	statusCode := http.StatusBadGateway
+	if err == nil && resp != nil {
+		statusCode = resp.StatusCode
 	}
 
-	// Forward request
-	resp, err := http.DefaultClient.Do(req)
+	lb.col.RecordRequest(ctx, server.ID, r.Method, r.URL.Path, statusCode, duration, success)
+
 	if err != nil {
-		// Record failed attempt
-		if err := database.InsertAttempt(r.Context(), server.ID, false); err != nil {
-			log.Printf("Failed to log failed attempt: %v", err)
-		}
-
-		// Mark server as down immediately
-		server.mu.Lock()
-		server.Alive = false
-		server.mu.Unlock()
-
-		// Async DB update
-		go func() {
-			if err := database.UpdateServerStatus(server.ID, false); err != nil {
-				log.Printf("Failed to update status for %s: %v", server.URL, err)
-			}
-		}()
-
-		success = false
-		http.Error(w, "Server unavailable", http.StatusBadGateway)
+		lb.logger.Warn("backend request failed",
+			zap.String("server", server.URL), zap.Error(err))
+		lb.markServerDown(ctx, server)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Record successful attempt
-	if err := database.InsertAttempt(r.Context(), server.ID, true); err != nil {
-		log.Printf("Failed to log successful attempt: %v", err)
+	// Copy response headers and body
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
 	}
-
-	// Copy response
-	success = resp.StatusCode < 500
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+
+	buf := make([]byte, 32*1024)
+	if _, copyErr := copyResponse(w, resp.Body, buf); copyErr != nil {
+		lb.logger.Warn("response copy error", zap.Error(copyErr))
+	}
 }
 
-// SelectBackend dynamically chooses the best backend server.
-func SelectBackend() string {
-	serverIP, err := database.GetLeastLoadedServer()
-	if err != nil {
-		log.Println("Error fetching backend server:", err)
-		return "" // Fallback strategy (e.g., round robin)
+// ─── background loops ─────────────────────────────────────────────────────────
+
+func (lb *LoadBalancer) runHealthChecks() {
+	interval := time.Duration(lb.cfg.IntervalSeconds) * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-lb.stop:
+			return
+		case <-ticker.C:
+			lb.checkAllServers()
+		}
 	}
-	log.Println("Routing request to:", serverIP)
-	return serverIP
+}
+
+func (lb *LoadBalancer) checkAllServers() {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(lb.cfg.TimeoutSeconds)*time.Second)
+	defer cancel()
+
+	for _, s := range lb.servers {
+		wasAlive := s.Alive
+		isAlive := lb.pingServer(ctx, s)
+
+		if wasAlive != isAlive {
+			s.Alive = isAlive
+			if s.ID > 0 {
+				if err := lb.db.UpdateServerStatus(ctx, s.ID, isAlive); err != nil {
+					lb.logger.Warn("failed to update server status in DB",
+						zap.Int("id", s.ID), zap.Error(err))
+				}
+			}
+			lb.logger.Info("server health changed",
+				zap.String("url", s.URL), zap.Bool("alive", isAlive))
+			if !isAlive {
+				s.Connections = 0 // reset stale counter
+			}
+		}
+	}
+}
+
+func (lb *LoadBalancer) pingServer(ctx context.Context, s *Server) bool {
+	client := &http.Client{Timeout: time.Duration(lb.cfg.TimeoutSeconds) * time.Second}
+	url := s.URL + "/health"
+	if !strings.HasPrefix(url, "http") {
+		url = "http://" + url
+	}
+	for i := 0; i < lb.cfg.Retries; i++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return false
+		}
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			return true
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
+}
+
+func (lb *LoadBalancer) runMetricsPolling() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-lb.stop:
+			return
+		case <-ticker.C:
+			ctx := context.Background()
+			lb.mu.RLock()
+			servers := make([]*Server, len(lb.servers))
+			copy(servers, lb.servers)
+			lb.mu.RUnlock()
+
+			for _, s := range servers {
+				if s.Alive && s.ID > 0 {
+					lb.col.UpdateServerMetrics(ctx, s.ID, s.URL)
+				}
+			}
+		}
+	}
+}
+
+func (lb *LoadBalancer) markServerDown(ctx context.Context, s *Server) {
+	lb.mu.Lock()
+	s.Alive = false
+	lb.mu.Unlock()
+
+	if s.ID > 0 {
+		if err := lb.db.UpdateServerStatus(ctx, s.ID, false); err != nil {
+			lb.logger.Warn("failed to mark server down", zap.Int("id", s.ID), zap.Error(err))
+		}
+	}
+	lb.logger.Warn("server marked down", zap.String("url", s.URL))
+}
+
+// ─── response copy helper ─────────────────────────────────────────────────────
+
+func copyResponse(dst http.ResponseWriter, src interface{ Read([]byte) (int, error) }, buf []byte) (int64, error) {
+	var written int64
+	for {
+		nr, err := src.Read(buf)
+		if nr > 0 {
+			nw, writeErr := dst.Write(buf[:nr])
+			written += int64(nw)
+			if writeErr != nil {
+				return written, writeErr
+			}
+		}
+		if err != nil {
+			if err.Error() == "EOF" {
+				return written, nil
+			}
+			return written, fmt.Errorf("read error: %w", err)
+		}
+	}
 }

@@ -1,0 +1,67 @@
+# File: configs/loki/promtail.yml
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    tenant_id: neurabalancer
+
+scrape_configs:
+
+  # Scrape all Docker container logs and add useful labels
+  - job_name: docker-containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: status
+            values: [running]
+
+    relabel_configs:
+      # Use the container name as the job label
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: job
+
+      # Add compose service name
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+
+      # Add compose project name
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label: project
+
+      # Add container ID (short) for log correlation
+      - source_labels: [__meta_docker_container_id]
+        regex: (.{12}).*
+        target_label: container_id
+
+    pipeline_stages:
+      # Parse JSON log lines emitted by zap (structured logging)
+      - json:
+          expressions:
+            level:      level
+            ts:         ts
+            msg:        msg
+            request_id: request_id
+            method:     method
+            path:       path
+            status:     status
+            duration:   duration
+            server_id:  server_id
+
+      # Promote parsed fields to Loki labels (keep cardinality low)
+      - labels:
+          level:
+          service:
+
+      # Use the log's own timestamp if available
+      - timestamp:
+          source: ts
+          format: RFC3339Nano
+          fallback_formats:
+            - UnixMs

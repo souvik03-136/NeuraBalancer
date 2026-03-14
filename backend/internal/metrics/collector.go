@@ -1,374 +1,301 @@
+// File: backend/internal/metrics/collector.go
 package metrics
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	dto "github.com/prometheus/client_model/go"
-	"github.com/souvik03-136/neurabalancer/backend/database"
+	"go.uber.org/zap"
+
+	"github.com/souvik03-136/neurabalancer/backend/internal/database"
 )
 
-// Collector collects request metrics.
+// Collector owns all Prometheus metrics for the load balancer.
+// It is a singleton — call NewCollector once and inject it everywhere.
 type Collector struct {
-	mu                 sync.Mutex
-	totalRequests      prometheus.Counter
-	successfulRequests prometheus.Counter
-	failedRequests     prometheus.Counter
-	responseTime       prometheus.Histogram
+	db     *database.DB
+	logger *zap.Logger
+	mu     sync.Mutex
 
-	cpuUsage      *prometheus.GaugeVec
-	memoryUsage   *prometheus.GaugeVec
-	errorRate     *prometheus.GaugeVec
-	responseTimes *prometheus.SummaryVec
+	// HTTP traffic counters
+	httpTotal      *prometheus.CounterVec
+	httpDuration   *prometheus.HistogramVec
 
-	// ML Metrics Tracking
-	mlInferenceTime prometheus.Histogram
-	mlPredictions   prometheus.Counter
-	mlErrors        prometheus.Counter
+	// Per-server gauges (labeled by server_id)
+	cpuUsage     *prometheus.GaugeVec
+	memoryUsage  *prometheus.GaugeVec
+	errorRate    *prometheus.GaugeVec
+	activeConns  *prometheus.GaugeVec
+	responseSummary *prometheus.SummaryVec
+
+	// ML model metrics
+	mlInferenceSeconds prometheus.Histogram
+	mlPredictions      prometheus.Counter
+	mlErrors           prometheus.Counter
+	mlCacheHits        prometheus.Counter
+	mlCacheMisses      prometheus.Counter
+	mlCircuitOpen      prometheus.Gauge
 }
 
-var (
-	collectorInstance *Collector
-	once              sync.Once
-)
+// NewCollector creates and registers all Prometheus metrics.
+// promauto handles registration; panics if a metric is registered twice —
+// prevented by the singleton pattern.
+func NewCollector(db *database.DB, logger *zap.Logger) *Collector {
+	return &Collector{
+		db:     db,
+		logger: logger,
 
-// NewCollector initializes and returns a new Collector (singleton).
-func NewCollector() *Collector {
-	once.Do(func() {
-		collectorInstance = &Collector{
-			totalRequests: prometheus.NewCounter(prometheus.CounterOpts{
-				Name: "http_total_requests",
-				Help: "Total number of HTTP requests",
-			}),
-			successfulRequests: prometheus.NewCounter(prometheus.CounterOpts{
-				Name: "http_successful_requests",
-				Help: "Number of successful HTTP requests",
-			}),
-			failedRequests: prometheus.NewCounter(prometheus.CounterOpts{
-				Name: "http_failed_requests",
-				Help: "Number of failed HTTP requests",
-			}),
-			responseTime: prometheus.NewHistogram(prometheus.HistogramOpts{
-				Name:    "http_response_time_seconds",
-				Help:    "Histogram of response times",
-				Buckets: prometheus.DefBuckets,
-			}),
-			cpuUsage: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-				Name: "server_cpu_usage",
-				Help: "Current CPU usage percentage",
-			}, []string{"server_id"}),
+		httpTotal: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "neurabalancer",
+			Name:      "http_requests_total",
+			Help:      "Total HTTP requests by method, path, status, and server.",
+		}, []string{"method", "path", "status", "server_id"}),
 
-			memoryUsage: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-				Name: "server_memory_usage",
-				Help: "Current memory usage percentage",
-			}, []string{"server_id"}),
+		httpDuration: promauto.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "neurabalancer",
+			Name:      "http_request_duration_seconds",
+			Help:      "HTTP request duration in seconds.",
+			Buckets:   []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		}, []string{"method", "path", "server_id"}),
 
-			errorRate: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-				Name: "server_error_rate",
-				Help: "Current error rate (0-1)",
-			}, []string{"server_id"}),
+		cpuUsage: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "neurabalancer",
+			Name:      "server_cpu_usage_percent",
+			Help:      "Current CPU usage percent for a backend server.",
+		}, []string{"server_id"}),
 
-			// Modified responseTimes metric with new name and help text.
-			responseTimes: prometheus.NewSummaryVec(prometheus.SummaryOpts{
-				Name:       "http_response_time_seconds_summary",
-				Help:       "Response time percentiles (summary)",
-				Objectives: map[float64]float64{0.5: 0.05, 0.95: 0.01},
-			}, []string{"server_id"}),
+		memoryUsage: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "neurabalancer",
+			Name:      "server_memory_usage_percent",
+			Help:      "Current memory usage percent for a backend server.",
+		}, []string{"server_id"}),
 
-			// Initialize ML metrics
-			mlInferenceTime: prometheus.NewHistogram(prometheus.HistogramOpts{
-				Name:    "ml_inference_time_seconds",
-				Help:    "Histogram of ML model inference times",
-				Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
-			}),
-			mlPredictions: prometheus.NewCounter(prometheus.CounterOpts{
-				Name: "ml_predictions_total",
-				Help: "Total number of ML model predictions",
-			}),
-			mlErrors: prometheus.NewCounter(prometheus.CounterOpts{
-				Name: "ml_errors_total",
-				Help: "Total number of ML model errors",
-			}),
+		errorRate: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "neurabalancer",
+			Name:      "server_error_rate",
+			Help:      "Rolling error rate (0–1) for a backend server.",
+		}, []string{"server_id"}),
+
+		activeConns: promauto.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "neurabalancer",
+			Name:      "server_active_connections",
+			Help:      "Number of active in-flight connections to a backend server.",
+		}, []string{"server_id"}),
+
+		responseSummary: promauto.NewSummaryVec(prometheus.SummaryOpts{
+			Namespace:  "neurabalancer",
+			Name:       "server_response_duration_seconds",
+			Help:       "Response time summary by server.",
+			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.95: 0.005, 0.99: 0.001},
+			MaxAge:     5 * time.Minute,
+		}, []string{"server_id"}),
+
+		mlInferenceSeconds: promauto.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "neurabalancer",
+			Name:      "ml_inference_duration_seconds",
+			Help:      "ML model inference latency.",
+			Buckets:   []float64{.001, .005, .01, .025, .05, .1, .25},
+		}),
+
+		mlPredictions: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: "neurabalancer",
+			Name:      "ml_predictions_total",
+			Help:      "Total successful ML predictions.",
+		}),
+
+		mlErrors: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: "neurabalancer",
+			Name:      "ml_errors_total",
+			Help:      "Total ML prediction errors (including circuit-breaker trips).",
+		}),
+
+		mlCacheHits: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: "neurabalancer",
+			Name:      "ml_cache_hits_total",
+			Help:      "ML prediction cache hits.",
+		}),
+
+		mlCacheMisses: promauto.NewCounter(prometheus.CounterOpts{
+			Namespace: "neurabalancer",
+			Name:      "ml_cache_misses_total",
+			Help:      "ML prediction cache misses.",
+		}),
+
+		mlCircuitOpen: promauto.NewGauge(prometheus.GaugeOpts{
+			Namespace: "neurabalancer",
+			Name:      "ml_circuit_breaker_open",
+			Help:      "1 if the ML circuit breaker is currently open, 0 otherwise.",
+		}),
+	}
+}
+
+// RecordRequest records a completed request for server serverID.
+// It updates Prometheus metrics and writes to the database asynchronously.
+func (c *Collector) RecordRequest(ctx context.Context, serverID int, method, path string, statusCode int, duration time.Duration, success bool) {
+	sid := fmt.Sprint(serverID)
+	statusStr := fmt.Sprint(statusCode)
+
+	c.httpTotal.WithLabelValues(method, path, statusStr, sid).Inc()
+	c.httpDuration.WithLabelValues(method, path, sid).Observe(duration.Seconds())
+	c.responseSummary.WithLabelValues(sid).Observe(duration.Seconds())
+
+	if !success {
+		// Update error-rate gauge: read current value, blend it
+		c.updateErrorRate(serverID)
+	}
+
+	// DB write is non-blocking — request handling must not be slowed by DB I/O
+	go func() {
+		if err := c.db.InsertRequest(ctx, serverID, success, duration); err != nil {
+			c.logger.Warn("failed to insert request record", zap.Error(err), zap.Int("server_id", serverID))
 		}
-
-		// Register metrics with Prometheus
-		prometheus.MustRegister(
-			collectorInstance.totalRequests,
-			collectorInstance.successfulRequests,
-			collectorInstance.failedRequests,
-			collectorInstance.responseTime,
-
-			collectorInstance.cpuUsage,
-			collectorInstance.memoryUsage,
-			collectorInstance.errorRate,
-			collectorInstance.responseTimes,
-
-			// Register ML metrics
-			collectorInstance.mlInferenceTime,
-			collectorInstance.mlPredictions,
-			collectorInstance.mlErrors,
-		)
-	})
-
-	return collectorInstance
+	}()
 }
 
-// RecordRequest records a request's metrics and updates the database.
-func (c *Collector) RecordRequest(serverID int, success bool, duration time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Update Prometheus metrics FIRST
-	c.totalRequests.Inc()
-	if success {
-		c.successfulRequests.Inc()
-	} else {
-		c.failedRequests.Inc()
-	}
-	c.responseTime.Observe(duration.Seconds())
-
-	// Validate serverID before proceeding
-	if serverID <= 0 {
-		log.Printf(" Invalid server ID: %d. Skipping metrics insertion.", serverID)
+// UpdateServerMetrics fetches live CPU/memory from the backend server's
+// /metrics endpoint and updates Prometheus gauges.
+// Called from background goroutine, not the request path.
+func (c *Collector) UpdateServerMetrics(ctx context.Context, serverID int, serverURL string) {
+	cpu, mem, err := fetchServerMetrics(ctx, serverURL)
+	if err != nil {
+		c.logger.Debug("failed to fetch server metrics",
+			zap.String("url", serverURL), zap.Error(err))
 		return
 	}
 
-	// Verify server existence
-	exists, err := database.ServerExists(serverID)
-	if err != nil {
-		log.Printf(" Error checking server existence (ID %d): %v", serverID, err)
-		return
-	}
-	if !exists {
-		log.Printf(" Server ID %d not found in database. Skipping metrics.", serverID)
-		return
-	}
+	sid := fmt.Sprint(serverID)
+	c.cpuUsage.WithLabelValues(sid).Set(cpu)
+	c.memoryUsage.WithLabelValues(sid).Set(mem)
 
-	// Store request IMMEDIATELY (critical for success rate accuracy)
-	if err := database.InsertRequest(serverID, success, duration); err != nil {
-		log.Printf(" Failed to log request (Server %d): %v", serverID, err)
-	}
-
-	// Update server load
-	if err := database.UpdateServerLoad(serverID, 1); err != nil {
-		log.Printf(" Failed to update load (Server %d): %v", serverID, err)
-	}
-
-	// Get server-specific metrics (avoid system fallback)
-	cpuUsage, memoryUsage, err := getActualServerMetrics(serverID)
-	if err != nil {
-		log.Printf(" Failed to get metrics for server %d: %v", serverID, err)
-		cpuUsage = 0.0 // Explicit default
-		memoryUsage = 0.0
-	}
-
-	// Clamp metrics BEFORE insertion
-	cpuUsage = clamp(cpuUsage, 0, 100)
-	memoryUsage = clamp(memoryUsage, 0, 100)
-
-	// Calculate success rate AFTER request is stored
-	successRate, err := calculateSuccessRate(serverID)
-	if err != nil {
-		log.Printf(" Failed to calculate success rate for server %d: %v", serverID, err)
-		successRate = 1.0 // Conservative fallback
-	}
-	successRate = clamp(successRate, 0, 1) // Ensure 0-1 range
-
-	// Insert metrics
-	if err := database.InsertMetrics(
-		serverID,
-		cpuUsage,
-		memoryUsage,
-		1,
-		successRate,
-	); err != nil {
-		log.Printf(" Failed to insert metrics (Server %d): %v", serverID, err)
-	}
-
-	// Store in both tables
-	if err := database.InsertRequest(serverID, success, duration); err != nil {
-		log.Printf("Failed to log request: %v", err)
-	}
-
-	// Create a background context for the InsertAttempt call
-	ctx := context.Background()
-	if err := database.InsertAttempt(ctx, serverID, success); err != nil {
-		log.Printf("Failed to log attempt: %v", err)
-	}
+	go func() {
+		sr, err := c.db.SuccessRate(ctx, serverID, 5*time.Minute)
+		if err != nil {
+			sr = 1.0
+		}
+		if err := c.db.InsertMetrics(ctx, serverID, cpu, mem, 0, sr); err != nil {
+			c.logger.Warn("failed to insert metrics", zap.Error(err))
+		}
+	}()
 }
 
-// Helper function to clamp values between min and max
-func clamp(value, min, max float64) float64 {
-	if value < min {
-		return min
-	}
-	if value > max {
-		return max
-	}
-	return value
+// SetActiveConnections updates the active-connection gauge for a server.
+func (c *Collector) SetActiveConnections(serverID, count int) {
+	c.activeConns.WithLabelValues(fmt.Sprint(serverID)).Set(float64(count))
 }
 
-// getActualServerMetrics fetches CPU and memory usage from the backend server's /metrics endpoint.
-func getActualServerMetrics(serverID int) (float64, float64, error) {
-	var serverURL string
-	err := database.DB.QueryRow(
-		"SELECT name FROM servers WHERE id = $1",
-		serverID,
-	).Scan(&serverURL)
-	if err != nil {
-		return 0, 0, fmt.Errorf("server URL lookup failed: %v", err)
-	}
+// ML helpers
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("%s/metrics", serverURL))
-	if err != nil {
-		return 0, 0, fmt.Errorf("metrics endpoint unreachable: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Validate response status code
-	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("non-200 status code: %d", resp.StatusCode)
-	}
-
-	// Parse JSON response
-	var metrics struct {
-		CPU    float64 `json:"cpu_usage"`
-		Memory float64 `json:"memory_usage"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&metrics); err != nil {
-		return 0, 0, fmt.Errorf("metrics parsing failed: %v", err)
-	}
-
-	// Validate metrics values
-	if metrics.CPU < 0 || metrics.CPU > 100 {
-		return 0, 0, fmt.Errorf("invalid CPU usage value: %.2f", metrics.CPU)
-	}
-	if metrics.Memory < 0 || metrics.Memory > 100 {
-		return 0, 0, fmt.Errorf("invalid memory usage value: %.2f", metrics.Memory)
-	}
-
-	return metrics.CPU, metrics.Memory, nil
-}
-
-// calculateSuccessRate calculates the success rate for a server based on recent requests.
-func calculateSuccessRate(serverID int) (float64, error) {
-	var attempts, successes int
-	err := database.DB.QueryRow(`
-        SELECT 
-            COUNT(*) FILTER (WHERE server_id = $1),
-            COUNT(*) FILTER (WHERE server_id = $1 AND success = true)
-        FROM attempts 
-        WHERE timestamp > NOW() - INTERVAL '5 minutes'`,
-		serverID,
-	).Scan(&attempts, &successes)
-
-	if attempts == 0 {
-		return 1.0, nil // Assume 100% success if no data
-	}
-	return float64(successes) / float64(attempts), err
-}
-
-// ML Metrics recording methods
-
-// RecordMLInference records ML inference time
-func (c *Collector) RecordMLInference(duration time.Duration) {
-	c.mlInferenceTime.Observe(duration.Seconds())
+func (c *Collector) RecordMLInference(d time.Duration) {
+	c.mlInferenceSeconds.Observe(d.Seconds())
 	c.mlPredictions.Inc()
 }
 
-// RecordMLError increments the ML error counter
-func (c *Collector) RecordMLError() {
-	c.mlErrors.Inc()
+func (c *Collector) RecordMLError()      { c.mlErrors.Inc() }
+func (c *Collector) RecordMLCacheHit()   { c.mlCacheHits.Inc() }
+func (c *Collector) RecordMLCacheMiss()  { c.mlCacheMisses.Inc() }
+func (c *Collector) SetCircuitOpen(open bool) {
+	if open {
+		c.mlCircuitOpen.Set(1)
+	} else {
+		c.mlCircuitOpen.Set(0)
+	}
 }
 
-// FOR ML feature extraction methods
+// Feature extraction helpers (called by ML strategy)
 
-// GetCurrentCPUUsage gets the current CPU usage for a server
-func (c *Collector) GetCurrentCPUUsage(serverID int) float64 {
-	gauge, err := c.cpuUsage.GetMetricWithLabelValues(fmt.Sprint(serverID))
-	if err != nil {
-		return 0
-	}
-
-	var m dto.Metric
-	if err := gauge.Write(&m); err != nil {
-		return 0
-	}
-
-	if m.Gauge != nil {
-		return m.Gauge.GetValue()
-	}
-	return 0
+func (c *Collector) GetCPUUsage(serverID int) float64 {
+	return getGaugeValue(c.cpuUsage, fmt.Sprint(serverID))
 }
 
-// GetCurrentMemoryUsage gets the current memory usage for a server
-func (c *Collector) GetCurrentMemoryUsage(serverID int) float64 {
-	gauge, err := c.memoryUsage.GetMetricWithLabelValues(fmt.Sprint(serverID))
-	if err != nil {
-		return 0
-	}
-
-	var m dto.Metric
-	if err := gauge.Write(&m); err != nil {
-		return 0
-	}
-
-	if m.Gauge != nil {
-		return m.Gauge.GetValue()
-	}
-	return 0
+func (c *Collector) GetMemoryUsage(serverID int) float64 {
+	return getGaugeValue(c.memoryUsage, fmt.Sprint(serverID))
 }
 
-// GetErrorRate gets the current error rate for a server
 func (c *Collector) GetErrorRate(serverID int) float64 {
-	gauge, err := c.errorRate.GetMetricWithLabelValues(fmt.Sprint(serverID))
-	if err != nil {
-		return 0
-	}
-
-	var m dto.Metric
-	if err := gauge.Write(&m); err != nil {
-		return 0
-	}
-
-	if m.Gauge != nil {
-		return m.Gauge.GetValue()
-	}
-	return 0
+	return getGaugeValue(c.errorRate, fmt.Sprint(serverID))
 }
 
-// GetResponsePercentile gets a specific response time percentile for a server
-func (c *Collector) GetResponsePercentile(serverID int, percentile float64) float64 {
-	metricChan := make(chan prometheus.Metric, 1)
+func (c *Collector) GetResponsePercentile(serverID int, quantile float64) float64 {
+	metricCh := make(chan prometheus.Metric, 1)
 	go func() {
-		c.responseTimes.Collect(metricChan)
-		close(metricChan)
+		c.responseSummary.Collect(metricCh)
+		close(metricCh)
 	}()
-
-	for metric := range metricChan {
-		var m dto.Metric
-		if err := metric.Write(&m); err != nil {
+	for m := range metricCh {
+		var dm dto.Metric
+		if err := m.Write(&dm); err != nil || dm.Summary == nil {
 			continue
 		}
-
-		if m.Summary == nil {
-			continue
-		}
-
-		for _, q := range m.Summary.Quantile {
-			if q.GetQuantile() == percentile {
+		for _, q := range dm.Summary.Quantile {
+			if q.GetQuantile() == quantile {
 				return q.GetValue()
 			}
 		}
 	}
-
 	return 0
+}
+
+// ─── private helpers ──────────────────────────────────────────────────────────
+
+func (c *Collector) updateErrorRate(serverID int) {
+	// Lightweight approximation: flip gauge toward 1 on error
+	current := getGaugeValue(c.errorRate, fmt.Sprint(serverID))
+	blended := 0.9*current + 0.1*1.0
+	c.errorRate.WithLabelValues(fmt.Sprint(serverID)).Set(blended)
+}
+
+func getGaugeValue(gv *prometheus.GaugeVec, label string) float64 {
+	g, err := gv.GetMetricWithLabelValues(label)
+	if err != nil {
+		return 0
+	}
+	var m dto.Metric
+	if err := g.Write(&m); err != nil || m.Gauge == nil {
+		return 0
+	}
+	return m.Gauge.GetValue()
+}
+
+// ServerMetricsResponse is what each backend server returns from /metrics.
+type ServerMetricsResponse struct {
+	CPUUsage    float64 `json:"cpu_usage"`
+	MemoryUsage float64 `json:"memory_usage"`
+}
+
+func fetchServerMetrics(ctx context.Context, serverURL string) (cpu, mem float64, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, serverURL+"/metrics", nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, fmt.Errorf("unexpected status %d from %s/metrics", resp.StatusCode, serverURL)
+	}
+
+	var result ServerMetricsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, 0, fmt.Errorf("decode error: %w", err)
+	}
+
+	if result.CPUUsage < 0 || result.CPUUsage > 100 {
+		return 0, 0, fmt.Errorf("invalid cpu_usage value: %v", result.CPUUsage)
+	}
+	if result.MemoryUsage < 0 || result.MemoryUsage > 100 {
+		return 0, 0, fmt.Errorf("invalid memory_usage value: %v", result.MemoryUsage)
+	}
+
+	return result.CPUUsage, result.MemoryUsage, nil
 }

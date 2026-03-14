@@ -1,38 +1,43 @@
+// File: backend/internal/api/router.go
 package api
 
 import (
-	"net/http"
-
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/labstack/echo/otelecho"
+	"go.uber.org/zap"
+
 	"github.com/souvik03-136/neurabalancer/backend/internal/loadbalancer"
-	"github.com/souvik03-136/neurabalancer/backend/internal/metrics"
 )
 
-// ✅ Move HealthCheck above RegisterRoutes for better readability
-func (h *Handler) HealthCheck(c echo.Context) error {
-	return c.JSON(http.StatusOK, map[string]string{"status": "load balancer running"})
-}
+// NewRouter creates and wires the Echo router with all middleware and routes.
+func NewRouter(lb *loadbalancer.LoadBalancer, logger *zap.Logger, serviceName string) *echo.Echo {
+	e := echo.New()
+	e.HideBanner = true
+	e.HidePort = true
 
-// RegisterRoutes sets up API endpoints
-func RegisterRoutes(e *echo.Echo, lb *loadbalancer.LoadBalancer, collector *metrics.Collector) {
-	handler := &Handler{LB: lb, Collector: collector}
+	// ── Middleware stack (order matters) ──────────────────────────────────────
+	e.Use(Recover(logger))
+	e.Use(RequestID())
+	e.Use(CORS())
+	e.Use(StructuredLogger(logger))
+	e.Use(otelecho.Middleware(serviceName))
+	e.Use(RateLimiter())
 
-	// Middleware
-	e.Use(middleware.Logger())  // Logs requests
-	e.Use(middleware.Recover()) // Panic recovery
-	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-		AllowOrigins: []string{"*"},
-		AllowMethods: []string{"GET", "POST", "OPTIONS"},
-	}))
+	h := NewHandler(lb, logger)
 
-	// ✅ Apply Metrics Middleware
-	e.Use(MetricsMiddleware(collector))
+	// ── Health / readiness probes (no auth required) ─────────────────────────
+	e.GET("/health/live",  h.HealthCheck)
+	e.GET("/health/ready", h.ReadinessCheck)
 
-	// Routes
-	e.GET("/", handler.HealthCheck)                   //  API health check
-	e.GET("/health", handler.LoadBalancerHealthCheck) //  Load Balancer health check
-	e.POST("/request", handler.HandleRequest)         //  Request forwarding (includes server_id handling)
-	e.GET("/metrics", handler.GetMetrics)             //  Prometheus Metrics Endpoint
+	// ── Prometheus scrape endpoint ────────────────────────────────────────────
+	e.GET("/metrics", echo.WrapHandler(promhttp.Handler()))
 
+	// ── Versioned API ─────────────────────────────────────────────────────────
+	v1 := e.Group("/api/v1")
+	v1.GET("/servers", h.ServersStatus)
+	v1.Any("/request", h.ProxyHandler)
+	v1.Any("/request/*", h.ProxyHandler)
+
+	return e
 }

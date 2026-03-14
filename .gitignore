@@ -1,3 +1,62 @@
-env
-venv
-onnxruntime-win-x64-1.21.0
+# File: .gitignore
+
+# Environment & secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Go binaries and build output
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+/neurabalancer
+/backend-server
+/ml-server
+
+# Go test cache and coverage
+*.test
+coverage.out
+*.prof
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+ml/training/venv/
+
+# ML model artifacts — track in Git LFS or CI artifact storage
+ml/models/*.onnx
+ml/models/scaler.json
+ml/models/inference_features.json
+!ml/models/.gitkeep
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (if mounted locally)
+postgres-data/
+grafana-data/
+loki-data/
+prometheus-data/
+tempo-data/
