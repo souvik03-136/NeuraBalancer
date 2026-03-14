@@ -273,6 +273,10 @@ func (ms *modelServer) handleVersion(w http.ResponseWriter, r *http.Request) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := loadConfig()
 
 	var ms *modelServer
@@ -293,7 +297,8 @@ func main() {
 		if err := ort.DestroyEnvironment(); err != nil {
 			log.Printf("ort destroy error: %v", err)
 		}
-		log.Fatalf("model server init failed: %v", err)
+		log.Printf("model server init failed: %v", err)
+		return 1
 	}
 
 	r := mux.NewRouter()
@@ -325,7 +330,7 @@ func main() {
 		log.Printf("signal %s received, shutting down", sig)
 	case err := <-serverErr:
 		log.Printf("server error: %v", err)
-		return
+		return 1
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -334,6 +339,7 @@ func main() {
 		log.Printf("shutdown error: %v", err)
 	}
 	log.Println("ML model server stopped")
+	return 0
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
