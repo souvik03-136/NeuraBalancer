@@ -3,6 +3,7 @@
 Validates that training features exactly match inference features.
 Prevents silent model/server mismatches after retraining.
 """
+
 import json
 from pathlib import Path
 
@@ -20,15 +21,15 @@ TRAINING_FEATURES = [
 
 def test_feature_count():
     """There must be exactly 6 features (matches Go expectedFeatures const)."""
-    assert len(TRAINING_FEATURES) == 6, (
-        f"Feature count {len(TRAINING_FEATURES)} does not match Go expectedFeatures=6"
-    )
+    assert (
+        len(TRAINING_FEATURES) == 6
+    ), f"Feature count {len(TRAINING_FEATURES)} does not match Go expectedFeatures=6"
 
 
 def test_no_duplicate_features():
-    assert len(TRAINING_FEATURES) == len(set(TRAINING_FEATURES)), (
-        "Duplicate feature names detected"
-    )
+    assert len(TRAINING_FEATURES) == len(
+        set(TRAINING_FEATURES)
+    ), "Duplicate feature names detected"
 
 
 @pytest.mark.skipif(

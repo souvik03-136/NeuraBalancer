@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 
 	"github.com/souvik03-136/neurabalancer/backend/internal/config"
@@ -205,7 +204,6 @@ func (lb *LoadBalancer) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	proxyReq.Header = r.Header.Clone()
 	// Propagate trace context downstream
-	tracer.Tracer("").(*trace.Span) // noop — otelecho middleware injects headers
 
 	resp, err := http.DefaultClient.Do(proxyReq)
 	duration := time.Since(start)

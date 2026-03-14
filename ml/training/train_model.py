@@ -55,6 +55,7 @@ OUTPUT_DIR = Path("ml/models")
 
 # ─── Data loading ──────────────────────────────────────────────────────────────
 
+
 def _get_db_conn() -> psycopg2.extensions.connection:
     load_dotenv()
     required = ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD"]
@@ -113,6 +114,7 @@ def fetch_training_data(lookback_days: int = 7) -> pd.DataFrame:
 
 # ─── Feature engineering ──────────────────────────────────────────────────────
 
+
 def create_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         log.warning("No data — returning empty feature frame")
@@ -149,10 +151,16 @@ def calculate_target(df: pd.DataFrame) -> pd.Series:
         + df["cpu_usage"] * 0.20
         + df["error"].astype(float) * 0.10
     )
-    return df.groupby("server_id")["response_time_ms"].transform(lambda _: score).groupby(df["server_id"]).mean()
+    return (
+        df.groupby("server_id")["response_time_ms"]
+        .transform(lambda _: score)
+        .groupby(df["server_id"])
+        .mean()
+    )
 
 
 # ─── Model definition ──────────────────────────────────────────────────────────
+
 
 class ServerScorer(nn.Module):
     def __init__(self, input_size: int) -> None:
@@ -176,6 +184,7 @@ class ServerScorer(nn.Module):
 
 
 # ─── Training ─────────────────────────────────────────────────────────────────
+
 
 def train(
     X_train: np.ndarray,
@@ -226,7 +235,13 @@ def train(
             patience_counter += 1
 
         if epoch % 25 == 0:
-            log.info("Epoch %d/%d — val_loss=%.4f (best=%.4f)", epoch, epochs, val_loss, best_val_loss)
+            log.info(
+                "Epoch %d/%d — val_loss=%.4f (best=%.4f)",
+                epoch,
+                epochs,
+                val_loss,
+                best_val_loss,
+            )
 
         if patience_counter >= patience_limit:
             log.info("Early stopping at epoch %d", epoch)
@@ -238,6 +253,7 @@ def train(
 
 
 # ─── Export ───────────────────────────────────────────────────────────────────
+
 
 def export_onnx(model: ServerScorer, input_size: int, path: Path) -> None:
     """
@@ -273,6 +289,7 @@ def save_feature_manifest(path: Path) -> None:
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

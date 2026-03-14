@@ -11,8 +11,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -125,7 +127,7 @@ func newModelServer(cfg serverConfig) (*modelServer, error) {
 	// FIX: input/output names now match what PyTorch onnx.export produces.
 	// Training code exports with input_names=['features'], output_names=['predicted_score'].
 	// If you retrain with TF, set MODEL_INPUT_NAME / MODEL_OUTPUT_NAME env vars.
-	inputName  := getEnv("MODEL_INPUT_NAME",  "features")
+	inputName := getEnv("MODEL_INPUT_NAME", "features")
 	outputName := getEnv("MODEL_OUTPUT_NAME", "predicted_score")
 
 	ms.session, err = ort.NewDynamicAdvancedSession(
@@ -273,7 +275,7 @@ func main() {
 	}()
 
 	r := mux.NewRouter()
-	r.HandleFunc("/health",  ms.handleHealth).Methods(http.MethodGet)
+	r.HandleFunc("/health", ms.handleHealth).Methods(http.MethodGet)
 	r.HandleFunc("/version", ms.handleVersion).Methods(http.MethodGet)
 	r.HandleFunc("/predict", ms.handlePredict).Methods(http.MethodPost)
 
