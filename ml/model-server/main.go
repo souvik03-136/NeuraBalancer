@@ -290,6 +290,9 @@ func main() {
 	var err error
 	ms, err = newModelServer(cfg)
 	if err != nil {
+		if err := ort.DestroyEnvironment(); err != nil {
+			log.Printf("ort destroy error: %v", err)
+		}
 		log.Fatalf("model server init failed: %v", err)
 	}
 
