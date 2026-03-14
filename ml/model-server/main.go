@@ -324,7 +324,8 @@ func main() {
 	case sig := <-quit:
 		log.Printf("signal %s received, shutting down", sig)
 	case err := <-serverErr:
-		log.Fatalf("server error: %v", err)
+		log.Printf("server error: %v", err)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
