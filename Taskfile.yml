@@ -5,9 +5,9 @@ dotenv: [".env"]
 
 vars:
   IMAGE_TAG:
-    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+    sh: git describe --tags --always --dirty 2>nul || echo dev
   BUILD_TIME:
-    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+    sh: powershell -Command "[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')"
 
 tasks:
 
@@ -15,20 +15,20 @@ tasks:
   setup:
     desc: "First-time project setup"
     cmds:
-      - cp -n .env.example .env || true
+      - powershell -Command "if (!(Test-Path .env)) { Copy-Item .env.example .env; Write-Host 'Created .env' } else { Write-Host '.env already exists' }"
       - pip install pre-commit
       - pre-commit install --install-hooks
       - go mod download
       - pip install -r ml/training/requirements.txt
-      - mkdir -p ml/models logs bin
-      - echo "Setup complete. Edit .env before running 'task up'."
+      - powershell -Command "New-Item -ItemType Directory -Force -Path ml/models,logs,bin | Out-Null; Write-Host 'Directories ready'"
+      - "echo \"Setup complete. Edit .env then run: task up\""
 
   # ── Local dev stack ───────────────────────────────────────────────────────────
   up:
     desc: "Start the full stack (builds images if needed)"
     cmds:
       - docker compose up -d --build
-      - echo "Stack started. Grafana → http://localhost:3000 (admin / $GRAFANA_ADMIN_PASSWORD)"
+      - echo "Stack started. Grafana at http://localhost:3000"
 
   down:
     desc: "Stop all containers"
@@ -70,22 +70,12 @@ tasks:
   build-balancer:
     desc: "Build the load-balancer binary"
     cmds:
-      - |
-        CGO_ENABLED=0 go build \
-          -ldflags="-w -s -X main.buildVersion={{.IMAGE_TAG}} -X main.buildTime={{.BUILD_TIME}}" \
-          -trimpath \
-          -o bin/neurabalancer \
-          ./backend/cmd/api
+      - powershell -Command "$env:CGO_ENABLED='0'; go build -ldflags='-w -s' -trimpath -o bin/neurabalancer.exe ./backend/cmd/api; if ($LASTEXITCODE -eq 0) { Write-Host 'load-balancer built OK' } else { exit 1 }"
 
   build-backend:
     desc: "Build the backend server binary"
     cmds:
-      - |
-        CGO_ENABLED=0 go build \
-          -ldflags="-w -s" \
-          -trimpath \
-          -o bin/backend-server \
-          ./backend/cmd/server
+      - powershell -Command "$env:CGO_ENABLED='0'; go build -ldflags='-w -s' -trimpath -o bin/backend-server.exe ./backend/cmd/server; if ($LASTEXITCODE -eq 0) { Write-Host 'backend-server built OK' } else { exit 1 }"
 
   # ── Testing ───────────────────────────────────────────────────────────────────
   test:
@@ -94,7 +84,7 @@ tasks:
       - go test -v -race -count=1 ./...
 
   test-coverage:
-    desc: "Run tests and open coverage report"
+    desc: "Run tests and open HTML coverage report"
     cmds:
       - go test -race -coverprofile=coverage.out ./...
       - go tool cover -html=coverage.out
@@ -125,26 +115,12 @@ tasks:
   db-migrate:
     desc: "Run database migrations against the running postgres container"
     cmds:
-      - |
-        docker run --rm \
-          --network neurabalancer_neurabalancer-net \
-          -v $(pwd)/backend/migrations:/migrations \
-          migrate/migrate \
-          -path=/migrations \
-          -database "postgres://${DB_USER}:${DB_PASSWORD}@postgres:${DB_PORT:-5432}/${DB_NAME}?sslmode=${DB_SSLMODE:-disable}" \
-          up
+      - powershell -Command "docker run --rm --network neurabalancer_neurabalancer-net -v ${PWD}/backend/migrations:/migrations migrate/migrate -path=/migrations -database \"postgres://$env:DB_USER`:$env:DB_PASSWORD`@postgres:5432/$env:DB_NAME`?sslmode=disable\" up"
 
   db-rollback:
     desc: "Roll back the last database migration"
     cmds:
-      - |
-        docker run --rm \
-          --network neurabalancer_neurabalancer-net \
-          -v $(pwd)/backend/migrations:/migrations \
-          migrate/migrate \
-          -path=/migrations \
-          -database "postgres://${DB_USER}:${DB_PASSWORD}@postgres:${DB_PORT:-5432}/${DB_NAME}?sslmode=${DB_SSLMODE:-disable}" \
-          down 1
+      - powershell -Command "docker run --rm --network neurabalancer_neurabalancer-net -v ${PWD}/backend/migrations:/migrations migrate/migrate -path=/migrations -database \"postgres://$env:DB_USER`:$env:DB_PASSWORD`@postgres:5432/$env:DB_NAME`?sslmode=disable\" down 1"
 
   db-reset:
     desc: "Drop and recreate all tables (WARNING: destroys data)"
@@ -155,45 +131,59 @@ tasks:
   db-psql:
     desc: "Open a psql shell in the running postgres container"
     cmds:
-      - docker compose exec postgres psql -U ${DB_USER} -d ${DB_NAME}
+      - docker compose exec postgres psql -U $DB_USER -d $DB_NAME
+
+  db-check:
+    desc: "Show tables and server rows in the database"
+    cmds:
+      - docker compose exec postgres psql -U $DB_USER -d $DB_NAME -c "\dt"
+      - docker compose exec postgres psql -U $DB_USER -d $DB_NAME -c "SELECT id, name, is_active FROM servers;"
+
+  # ── Health checks ─────────────────────────────────────────────────────────────
+  health:
+    desc: "Check all API health endpoints"
+    cmds:
+      - powershell -Command "Write-Host '--- Liveness ---'; (Invoke-RestMethod http://localhost:8080/health/live) | ConvertTo-Json; Write-Host '--- Readiness ---'; (Invoke-RestMethod http://localhost:8080/health/ready) | ConvertTo-Json; Write-Host '--- Servers ---'; (Invoke-RestMethod http://localhost:8080/api/v1/servers) | ConvertTo-Json"
 
   # ── ML ───────────────────────────────────────────────────────────────────────
   ml-train:
     desc: "Train the ML model (requires running DB with data)"
     cmds:
-      - cd ml/training && python train_model.py
+      - powershell -Command "Push-Location ml/training; python train_model.py; Pop-Location"
 
   ml-serve:
     desc: "Start the ML model server locally (outside Docker)"
     cmds:
-      - |
-        ML_SERVICE_PORT=${ML_SERVICE_PORT:-8081} \
-        MODEL_PATH=ml/models/load_balancer.onnx \
-        SCALER_PATH=ml/models/scaler.json \
-        go run ./ml/model-server/
+      - powershell -Command "$env:ML_SERVICE_PORT='8081'; $env:MODEL_PATH='ml/models/load_balancer.onnx'; $env:SCALER_PATH='ml/models/scaler.json'; go run ./ml/model-server/"
 
   # ── Docker helpers ────────────────────────────────────────────────────────────
   docker-build-all:
-    desc: "Build all Docker images with the current git tag"
+    desc: "Build all Docker images"
     cmds:
-      - docker compose build --build-arg BUILD_VERSION={{.IMAGE_TAG}}
+      - docker compose build
 
   docker-push:
-    desc: "Push images to the configured registry (set REGISTRY env var)"
+    desc: "Push images to the configured registry"
     cmds:
       - docker compose push
 
   # ── Load testing ─────────────────────────────────────────────────────────────
   load-test:
-    desc: "Run 1000 requests at 50 concurrent (requires 'hey' tool)"
+    desc: "Send 100 test requests through the load balancer"
     cmds:
-      - hey -n 1000 -c 50 -m POST http://localhost:${APP_PORT:-8080}/api/v1/request
+      - |
+        powershell -Command "1..100 | ForEach-Object { try { Invoke-RestMethod -Method POST -Uri 'http://localhost:8080/api/v1/request' -ContentType 'application/json' -Body \"{`\"request`\": $_}\" | Out-Null } catch {} }; Write-Host '100 requests sent'"
+
+  load-test-hey:
+    desc: "Load test with hey (install: go install github.com/rakyll/hey@latest)"
+    cmds:
+      - "hey -n 1000 -c 50 -m POST -H \"Content-Type: application/json\" -d '{\"test\":true}' http://localhost:8080/api/v1/request"
 
   # ── Cleanup ───────────────────────────────────────────────────────────────────
   clean:
     desc: "Remove build artefacts"
     cmds:
-      - rm -rf bin/ coverage.out
+      - powershell -Command "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue bin,coverage.out; Write-Host 'Cleaned'"
 
   clean-all:
     desc: "Remove build artefacts, Docker images, and volumes"
