@@ -2,6 +2,9 @@
 
 **An AI-driven, self-optimising HTTP load balancer** — routes requests using real-time server metrics and an ONNX reinforcement-learning model, with full observability (Prometheus · Grafana · Loki · Tempo).
 
+> **Want to see it running?**  
+> The complete end-to-end demo — terminal output, Prometheus graphs, Grafana dashboards, Loki logs, and database verification — is documented in **[DEMO_WALKTHROUGH.md](./DEMO_WALKTHROUGH.md)**.
+
 ---
 
 ## Table of Contents
@@ -103,7 +106,8 @@ neurabalancer/
 ├── docker-compose.yml     # Full local stack
 ├── Taskfile.yml           # Developer task runner
 ├── .env.example           # All available configuration keys
-└── .golangci.yml          # Linter configuration
+├── .golangci.yml          # Linter configuration
+└── DEMO_WALKTHROUGH.md    # End-to-end demo with screenshots
 ```
 
 ---
@@ -170,6 +174,23 @@ curl http://localhost:8080/api/v1/servers
 | Load Balancer metrics | http://localhost:8080/metrics | — |
 
 The **NeuraBalancer — Overview** dashboard is pre-provisioned in Grafana.
+
+---
+
+## Demo Walkthrough
+
+If you want to verify the system is working end-to-end — or show it to someone — the **[DEMO_WALKTHROUGH.md](./DEMO_WALKTHROUGH.md)** covers everything in order:
+
+| Phase | What it covers |
+|---|---|
+| [Phase 1](./DEMO_WALKTHROUGH.md#phase-1--stack-startup) | All 13 containers healthy, load balancer startup logs, backend server logs |
+| [Phase 2](./DEMO_WALKTHROUGH.md#phase-2--api-health-checks) | Liveness probe, readiness probe, server inventory |
+| [Phase 3](./DEMO_WALKTHROUGH.md#phase-3--sending-real-traffic) | Routing individual requests and 100-request burst |
+| [Phase 4](./DEMO_WALKTHROUGH.md#phase-4--raw-prometheus-metrics) | Raw `neurabalancer_*` metrics from `/metrics` endpoint |
+| [Phase 5](./DEMO_WALKTHROUGH.md#phase-5--database-verification) | TimescaleDB tables — servers registered, requests recorded |
+| [Phase 6](./DEMO_WALKTHROUGH.md#phase-6--prometheus-ui) | Prometheus UI — targets, request rate, P95 latency, CPU graphs |
+| [Phase 7](./DEMO_WALKTHROUGH.md#phase-7--grafana-dashboards--loki-logs) | Grafana overview dashboard, Loki structured log explorer |
+| [Phase 8](./DEMO_WALKTHROUGH.md#phase-8--ml-service-status) | ML service degraded mode — expected on fresh install |
 
 ---
 
