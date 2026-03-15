@@ -151,7 +151,7 @@ func (c *Collector) RecordRequest(ctx context.Context, serverID int, method, pat
 
 	// DB write is non-blocking — request handling must not be slowed by DB I/O
 	go func() {
-		if err := c.db.InsertRequest(ctx, serverID, success, duration); err != nil {
+    if err := c.db.InsertRequest(context.Background(), serverID, success, duration); err != nil {
 			c.logger.Warn("failed to insert request record", zap.Error(err), zap.Int("server_id", serverID))
 		}
 	}()

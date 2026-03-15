@@ -1,4 +1,4 @@
-# File: configs/otel/otel-collector.yml
+﻿# File: configs/otel/otel-collector.yml
 receivers:
   otlp:
     protocols:
@@ -8,14 +8,6 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
-  # Remove high-cardinality attributes that bloat trace storage
-  attributes/sanitize:
-    actions:
-      - key: http.request.header.authorization
-        action: delete
-      - key: http.request.header.cookie
-        action: delete
-
   batch:
     timeout: 5s
     send_batch_size: 512
@@ -25,19 +17,12 @@ processors:
     limit_mib: 256
     spike_limit_mib: 64
 
-  resource:
-    attributes:
-      - key: deployment.environment
-        value: ${APP_ENV:-development}
-        action: upsert
-
 exporters:
   otlp/tempo:
     endpoint: tempo:4317
     tls:
       insecure: true
 
-  # Self-monitoring metrics exported to Prometheus
   prometheus:
     endpoint: 0.0.0.0:8888
 
@@ -48,10 +33,8 @@ service:
   pipelines:
     traces:
       receivers:  [otlp]
-      processors: [memory_limiter, resource, attributes/sanitize, batch]
+      processors: [memory_limiter, batch]
       exporters:  [otlp/tempo, logging]
-
-  extensions: []
 
   telemetry:
     logs:
