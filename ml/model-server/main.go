@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,12 +87,16 @@ type modelServer struct {
 	sc      scaler
 	session *ort.DynamicAdvancedSession
 	mu      sync.RWMutex
+	loaded  bool // true only when model + scaler are ready
 }
 
+// newModelServer attempts to load the model and scaler.
+// Returns (nil, err) if files are missing — caller should start in degraded mode.
+// Returns (nil, err) with a descriptive error for any other failure.
 func newModelServer(cfg serverConfig) (*modelServer, error) {
 	ms := &modelServer{cfg: cfg}
 
-	// Validate files exist
+	// Check files exist before touching ONNX runtime
 	for _, path := range []string{cfg.ModelPath, cfg.ScalerPath} {
 		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("required file missing %q: %w", path, err)
@@ -120,17 +123,11 @@ func newModelServer(cfg serverConfig) (*modelServer, error) {
 
 	opts, err := ort.NewSessionOptions()
 	if err != nil {
+		_ = ort.DestroyEnvironment()
 		return nil, fmt.Errorf("session options: %w", err)
 	}
-	defer func() {
-		if err := opts.Destroy(); err != nil {
-			log.Printf("opts destroy error: %v", err)
-		}
-	}()
+	defer opts.Destroy()
 
-	// FIX: input/output names now match what PyTorch onnx.export produces.
-	// Training code exports with input_names=['features'], output_names=['predicted_score'].
-	// If you retrain with TF, set MODEL_INPUT_NAME / MODEL_OUTPUT_NAME env vars.
 	inputName := getEnv("MODEL_INPUT_NAME", "features")
 	outputName := getEnv("MODEL_OUTPUT_NAME", "predicted_score")
 
@@ -141,11 +138,12 @@ func newModelServer(cfg serverConfig) (*modelServer, error) {
 		opts,
 	)
 	if err != nil {
+		_ = ort.DestroyEnvironment()
 		return nil, fmt.Errorf("load model: %w", err)
 	}
 
-	log.Printf("model server ready — model=%s input=%s output=%s",
-		cfg.ModelPath, inputName, outputName)
+	ms.loaded = true
+	log.Printf("model loaded — path=%s input=%s output=%s", cfg.ModelPath, inputName, outputName)
 	return ms, nil
 }
 
@@ -160,22 +158,14 @@ func (ms *modelServer) predict(features []float32) (float32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("input tensor: %w", err)
 	}
-	defer func() {
-		if err := inTensor.Destroy(); err != nil {
-			log.Printf("inTensor destroy error: %v", err)
-		}
-	}()
+	defer inTensor.Destroy()
 
 	outShape := ort.NewShape(1, 1)
 	outTensor, err := ort.NewEmptyTensor[float32](outShape)
 	if err != nil {
 		return 0, fmt.Errorf("output tensor: %w", err)
 	}
-	defer func() {
-		if err := outTensor.Destroy(); err != nil {
-			log.Printf("outTensor destroy error: %v", err)
-		}
-	}()
+	defer outTensor.Destroy()
 
 	if err := ms.session.Run(
 		[]ort.ArbitraryTensor{inTensor},
@@ -206,109 +196,118 @@ type predictRequest struct {
 	} `json:"servers"`
 }
 
-// FIX: response field is now "predictions" to match what the Go strategy expects.
 type predictResponse struct {
 	Predictions []float32 `json:"predictions"`
 }
 
-func (ms *modelServer) handlePredict(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB limit
-	if err != nil {
-		http.Error(w, "read error", http.StatusBadRequest)
-		return
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
+// buildHandlers returns a mux.Router.
+// ms may be nil (degraded mode — no model loaded).
+func buildHandlers(ms *modelServer) *mux.Router {
+	r := mux.NewRouter()
 
-	var req predictRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	if len(req.Servers) == 0 {
-		http.Error(w, "servers list is empty", http.StatusBadRequest)
-		return
-	}
-
-	scores := make([]float32, len(req.Servers))
-	for i, srv := range req.Servers {
-		feats := []float32{
-			srv.CPUUsage,
-			srv.MemoryUsage,
-			float32(srv.ActiveConns),
-			srv.ErrorRate,
-			srv.ResponseP95,
-			float32(srv.Capacity),
+	// Health — always 200 so Docker/compose never marks the container unhealthy
+	// due to missing model. Status field tells the load balancer the real state.
+	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		status := "ok"
+		if ms == nil || !ms.loaded {
+			status = "degraded - no model loaded. Run: task ml-train"
 		}
-		if len(feats) != expectedFeatures {
-			http.Error(w, fmt.Sprintf("server %d: wrong feature count", i), http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+	}).Methods(http.MethodGet)
+
+	// Version
+	r.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		version := "none - model not trained yet"
+		if ms != nil && ms.loaded {
+			version = getEnv("MODEL_VERSION", "1.0.0")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"model_version": version,
+			"onnx_version":  "1.16.3",
+		})
+	}).Methods(http.MethodGet)
+
+	// Predict — returns 503 when model is not loaded so the load balancer
+	// circuit breaker trips and falls back to least_connections automatically.
+	r.HandleFunc("/predict", func(w http.ResponseWriter, r *http.Request) {
+		if ms == nil || !ms.loaded {
+			http.Error(w, "model not loaded - train a model first with: task ml-train", http.StatusServiceUnavailable)
 			return
 		}
-		score, err := ms.predict(feats)
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		if err != nil {
-			log.Printf("prediction error for server %d: %v", srv.ServerID, err)
-			http.Error(w, "prediction failed", http.StatusInternalServerError)
+			http.Error(w, "read error", http.StatusBadRequest)
 			return
 		}
-		scores[i] = score
-	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(predictResponse{Predictions: scores})
-}
+		var req predictRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if len(req.Servers) == 0 {
+			http.Error(w, "servers list is empty", http.StatusBadRequest)
+			return
+		}
 
-func (ms *modelServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
+		scores := make([]float32, len(req.Servers))
+		for i, srv := range req.Servers {
+			feats := []float32{
+				srv.CPUUsage,
+				srv.MemoryUsage,
+				float32(srv.ActiveConns),
+				srv.ErrorRate,
+				srv.ResponseP95,
+				float32(srv.Capacity),
+			}
+			score, err := ms.predict(feats)
+			if err != nil {
+				log.Printf("prediction error for server %d: %v", srv.ServerID, err)
+				http.Error(w, "prediction failed", http.StatusInternalServerError)
+				return
+			}
+			scores[i] = score
+		}
 
-func (ms *modelServer) handleVersion(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"model_version": getEnv("MODEL_VERSION", "1.0.0"),
-		"onnx_version":  "1.16.3",
-	})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(predictResponse{Predictions: scores})
+	}).Methods(http.MethodPost)
+
+	return r
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	os.Exit(run())
-}
-
-func run() int {
 	cfg := loadConfig()
 
-	var ms *modelServer
+	// Attempt to load model — if it fails, start in degraded mode (no crash).
+	ms, err := newModelServer(cfg)
+	if err != nil {
+		log.Printf("WARNING: starting in degraded mode — %v", err)
+		log.Printf("The /predict endpoint will return 503 until a model is trained.")
+		log.Printf("To train: task ml-train  then  docker compose restart ml-service")
+		ms = nil
+	}
+
+	// Cleanup on exit
 	defer func() {
 		if ms != nil && ms.session != nil {
-			if err := ms.session.Destroy(); err != nil {
-				log.Printf("session destroy error: %v", err)
-			}
+			ms.session.Destroy()
 		}
-		if err := ort.DestroyEnvironment(); err != nil {
-			log.Printf("ort destroy error: %v", err)
+		// Only destroy ONNX env if it was successfully initialised (i.e. ms != nil)
+		if ms != nil {
+			_ = ort.DestroyEnvironment()
 		}
 	}()
 
-	var err error
-	ms, err = newModelServer(cfg)
-	if err != nil {
-		if err := ort.DestroyEnvironment(); err != nil {
-			log.Printf("ort destroy error: %v", err)
-		}
-		log.Printf("model server init failed: %v", err)
-		return 1
-	}
-
-	r := mux.NewRouter()
-	r.HandleFunc("/health", ms.handleHealth).Methods(http.MethodGet)
-	r.HandleFunc("/version", ms.handleVersion).Methods(http.MethodGet)
-	r.HandleFunc("/predict", ms.handlePredict).Methods(http.MethodPost)
-
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
-		Handler:      r,
+		Handler:      buildHandlers(ms),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  30 * time.Second,
@@ -316,7 +315,7 @@ func run() int {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("ML model server listening on :%s", cfg.Port)
+		log.Printf("ML model server listening on :%s (loaded=%v)", cfg.Port, ms != nil)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -327,10 +326,9 @@ func run() int {
 
 	select {
 	case sig := <-quit:
-		log.Printf("signal %s received, shutting down", sig)
+		log.Printf("signal %s — shutting down", sig)
 	case err := <-serverErr:
-		log.Printf("server error: %v", err)
-		return 1
+		log.Fatalf("server error: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -339,10 +337,9 @@ func run() int {
 		log.Printf("shutdown error: %v", err)
 	}
 	log.Println("ML model server stopped")
-	return 0
 }
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
