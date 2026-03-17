@@ -494,5 +494,3 @@ backend-1  backend-2  backend-3
 | OTel Collector | 4317 | OTLP receiver |
 
 ---
-
-*Generated from NeuraBalancer production demo — March 2026*
